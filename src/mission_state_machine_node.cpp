@@ -79,11 +79,10 @@ public:
     // 이미지 3사분면(왼쪽 아래) 쪽. 끝단이 아닌 대략 (0.30, 0.70)
     fork_target_x_ = declare_parameter<double>("fork_target_x", 0.30);
     fork_target_y_ = declare_parameter<double>("fork_target_y", 0.70);
-    // 테스트 정렬 목표: 이미지 기준 오른쪽 위(1사분면)로 buoy 중심을 붙인다.
-    buoy_align_target_x_ = declare_parameter<double>("buoy_align_target_x", 0.85);
-    buoy_align_target_y_ = declare_parameter<double>("buoy_align_target_y", 0.25);
-    stick_deadband_x_ = declare_parameter<double>("stick_deadband_x", 0.06);
-    stick_deadband_y_ = declare_parameter<double>("stick_deadband_y", 0.08);
+    // buoy 중심이 이 경계를 넘으면 이미지 오른쪽 위 허용 영역으로 판단한다.
+    // x는 오른쪽으로, y는 아래쪽으로 증가한다.
+    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.60);
+    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.40);
     align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
 
     // --- 포크 삽입 / 분리 / 후퇴 / 검증 ---
@@ -250,6 +249,13 @@ private:
     if (target_confirm_hits_ < 1 || target_confirm_sec_ < 0.0)
     {
       throw std::invalid_argument("invalid acoustic-vision handshake confirmation parameters");
+    }
+    if (
+      !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
+      align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
+      align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0)
+    {
+      throw std::invalid_argument("alignment zone bounds must be in [0, 1]");
     }
   }
 
@@ -623,8 +629,8 @@ private:
     return std::clamp(floor_pwm + delta, floor_pwm, approach_forward_pwm_);
   }
 
-  // buoy 중심을 이미지 오른쪽 위(1사분면) 목표로 정렬한다.
-  // deadband 안에서 align_stable_sec_ 유지 시 STRONG_FORWARD로 전이한다.
+  // buoy 중심을 이미지 오른쪽 위 허용 영역으로 보낸다.
+  // 영역 안에서는 해당 축을 중립으로 두고, align_stable_sec_ 유지 시 STRONG_FORWARD로 전이한다.
   void run_align_stick(std::array<uint16_t, 18> & channels)
   {
     if (!recent(buoy_)) {
@@ -632,17 +638,25 @@ private:
       transition_to(State::SEARCH, "buoy lost during fine alignment");
       return;
     }
+    const double x = buoy_->center_x / buoy_->image_width;
+    const double y = buoy_->center_y / buoy_->image_height;
+    const bool in_alignment_zone = x >= align_zone_min_x_ && y <= align_zone_max_y_;
+
+    // 이미 만족한 축은 보정하지 않는다. 관성으로 한 축이 다시 밀리는 것을 줄인다.
+    const double error_x = x < align_zone_min_x_
+      ? std::clamp((x - align_zone_min_x_) * 2.0, -1.0, 0.0) : 0.0;
+    const double error_y = y > align_zone_max_y_
+      ? std::clamp((y - align_zone_max_y_) * 2.0, 0.0, 1.0) : 0.0;
     // 정렬 중에도 수심 P를 섞어 양성 부력으로 뜨는 것을 막는다.
-    apply_visual_tracking(
-      channels, *buoy_, buoy_align_target_x_, buoy_align_target_y_, neutral_pwm_,
-      *mission_hold_depth_m_, approach_vision_throttle_weight_);
-    const auto [error_x, error_y] = normalized_error(
-      *buoy_, buoy_align_target_x_, buoy_align_target_y_);
-    if (std::abs(error_x) <= stick_deadband_x_ && std::abs(error_y) <= stick_deadband_y_) {
+    apply_tracking_errors(
+      channels, error_x, error_y, neutral_pwm_, *mission_hold_depth_m_,
+      approach_vision_throttle_weight_);
+
+    if (in_alignment_zone) {
       if (!condition_started_at_) {
         condition_started_at_ = now();
       } else if ((now() - *condition_started_at_).seconds() >= align_stable_sec_) {
-        transition_to(State::STRONG_FORWARD, "stick alignment stable");
+        transition_to(State::STRONG_FORWARD, "alignment zone stable");
       }
     } else {
       condition_started_at_.reset();
@@ -711,8 +725,17 @@ private:
     std::optional<double> depth_blend_target_m = std::nullopt,
     double vision_throttle_weight = 1.0)
   {
-    set_neutral_control(channels);
     const auto [error_x, error_y] = normalized_error(detection, target_x, target_y);
+    apply_tracking_errors(
+      channels, error_x, error_y, forward_pwm, depth_blend_target_m, vision_throttle_weight);
+  }
+
+  void apply_tracking_errors(
+    std::array<uint16_t, 18> & channels, double error_x, double error_y, int forward_pwm,
+    std::optional<double> depth_blend_target_m = std::nullopt,
+    double vision_throttle_weight = 1.0)
+  {
+    set_neutral_control(channels);
     const double yaw_sign = yaw_invert_ ? -1.0 : 1.0;
     const double vertical_sign = vertical_positive_is_up_ ? -1.0 : 1.0;
     set_channel(
@@ -953,10 +976,8 @@ private:
   double buoy_same_target_center_ratio_{0.12};
   double fork_target_x_{0.30};
   double fork_target_y_{0.70};
-  double buoy_align_target_x_{0.85};
-  double buoy_align_target_y_{0.25};
-  double stick_deadband_x_{0.06};
-  double stick_deadband_y_{0.08};
+  double align_zone_min_x_{0.60};
+  double align_zone_max_y_{0.40};
   double align_stable_sec_{0.7};
   int insert_pwm_{1560};
   double insert_duration_sec_{0.8};

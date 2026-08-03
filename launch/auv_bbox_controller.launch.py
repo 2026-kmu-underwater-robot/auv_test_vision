@@ -69,17 +69,15 @@ def generate_launch_description():
             DeclareLaunchArgument("fork_target_x", default_value="0.30"),
             DeclareLaunchArgument("fork_target_y", default_value="0.70"),
             DeclareLaunchArgument(
-                "buoy_align_target_x",
-                default_value="0.85",
-                description="Buoy center x target for ALIGN_STICK; 1.0 is the far right.",
+                "align_zone_min_x",
+                default_value="0.60",
+                description="ALIGN_STICK success zone: buoy center must be at or right of this x.",
             ),
             DeclareLaunchArgument(
-                "buoy_align_target_y",
-                default_value="0.25",
-                description="Buoy center y target for ALIGN_STICK; 0.0 is the top.",
+                "align_zone_max_y",
+                default_value="0.40",
+                description="ALIGN_STICK success zone: buoy center must be at or above this y.",
             ),
-            DeclareLaunchArgument("stick_deadband_x", default_value="0.06"),
-            DeclareLaunchArgument("stick_deadband_y", default_value="0.08"),
             DeclareLaunchArgument("align_stable_sec", default_value="0.7"),
             DeclareLaunchArgument("insert_pwm", default_value="1560"),
             DeclareLaunchArgument("insert_duration_sec", default_value="0.8"),
@@ -151,17 +149,11 @@ def generate_launch_description():
                         "fork_target_y": ParameterValue(
                             LaunchConfiguration("fork_target_y"), value_type=float
                         ),
-                        "buoy_align_target_x": ParameterValue(
-                            LaunchConfiguration("buoy_align_target_x"), value_type=float
+                        "align_zone_min_x": ParameterValue(
+                            LaunchConfiguration("align_zone_min_x"), value_type=float
                         ),
-                        "buoy_align_target_y": ParameterValue(
-                            LaunchConfiguration("buoy_align_target_y"), value_type=float
-                        ),
-                        "stick_deadband_x": ParameterValue(
-                            LaunchConfiguration("stick_deadband_x"), value_type=float
-                        ),
-                        "stick_deadband_y": ParameterValue(
-                            LaunchConfiguration("stick_deadband_y"), value_type=float
+                        "align_zone_max_y": ParameterValue(
+                            LaunchConfiguration("align_zone_max_y"), value_type=float
                         ),
                         "align_stable_sec": ParameterValue(
                             LaunchConfiguration("align_stable_sec"), value_type=float
