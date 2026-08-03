@@ -81,6 +81,8 @@ public:
     fork_target_y_ = declare_parameter<double>("fork_target_y", 0.70);
     // buoy 중심이 이 경계를 넘으면 이미지 오른쪽 위 허용 영역으로 판단한다.
     // x는 오른쪽으로, y는 아래쪽으로 증가한다.
+    buoy_align_target_x_ = declare_parameter<double>("buoy_align_target_x", 0.85);
+    buoy_align_target_y_ = declare_parameter<double>("buoy_align_target_y", 0.25);
     align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.50);
     align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.50);
     align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
@@ -94,9 +96,9 @@ public:
     backoff_duration_sec_ = declare_parameter<double>("backoff_duration_sec", 0.5);
     // 반복 시험용 강한 전진/후진 명령. 기존 삽입/분리/후퇴 파라미터는 호환을 위해 유지한다.
     strong_forward_pwm_ = declare_parameter<int>("strong_forward_pwm", 1700);
-    strong_forward_duration_sec_ = declare_parameter<double>("strong_forward_duration_sec", 0.8);
+    strong_forward_duration_sec_ = declare_parameter<double>("strong_forward_duration_sec", 1.2);
     strong_backoff_pwm_ = declare_parameter<int>("strong_backoff_pwm", 1300);
-    strong_backoff_duration_sec_ = declare_parameter<double>("strong_backoff_duration_sec", 0.8);
+    strong_backoff_duration_sec_ = declare_parameter<double>("strong_backoff_duration_sec", 1.2);
     verify_clear_sec_ = declare_parameter<double>("verify_clear_sec", 1.0);
     verify_timeout_sec_ = declare_parameter<double>("verify_timeout_sec", 3.0);
     max_target_retries_ = declare_parameter<int>("max_target_retries", 2);
@@ -251,11 +253,15 @@ private:
       throw std::invalid_argument("invalid acoustic-vision handshake confirmation parameters");
     }
     if (
+      !std::isfinite(buoy_align_target_x_) || !std::isfinite(buoy_align_target_y_) ||
+      buoy_align_target_x_ < 0.0 || buoy_align_target_x_ > 1.0 ||
+      buoy_align_target_y_ < 0.0 || buoy_align_target_y_ > 1.0 ||
       !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
       align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
-      align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0)
+      align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0 ||
+      !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0)
     {
-      throw std::invalid_argument("alignment zone bounds must be in [0, 1]");
+      throw std::invalid_argument("invalid alignment target, zone, or stable time");
     }
   }
 
@@ -629,8 +635,8 @@ private:
     return std::clamp(floor_pwm + delta, floor_pwm, approach_forward_pwm_);
   }
 
-  // buoy 중심을 이미지 오른쪽 위 허용 영역으로 보낸다.
-  // 영역 안에서는 해당 축을 중립으로 두고, align_stable_sec_ 유지 시 STRONG_FORWARD로 전이한다.
+  // buoy 중심을 (buoy_align_target_x_, buoy_align_target_y_)로 계속 제어한다.
+  // 별도의 넓은 허용 영역 안에서 align_stable_sec_ 유지 시 STRONG_FORWARD로 전이한다.
   void run_align_stick(std::array<uint16_t, 18> & channels)
   {
     if (!recent(buoy_)) {
@@ -642,15 +648,11 @@ private:
     const double y = buoy_->center_y / buoy_->image_height;
     const bool in_alignment_zone = x >= align_zone_min_x_ && y <= align_zone_max_y_;
 
-    // 이미 만족한 축은 보정하지 않는다. 관성으로 한 축이 다시 밀리는 것을 줄인다.
-    const double error_x = x < align_zone_min_x_
-      ? std::clamp((x - align_zone_min_x_) * 2.0, -1.0, 0.0) : 0.0;
-    const double error_y = y > align_zone_max_y_
-      ? std::clamp((y - align_zone_max_y_) * 2.0, 0.0, 1.0) : 0.0;
-    // 정렬 중에도 수심 P를 섞어 양성 부력으로 뜨는 것을 막는다.
-    apply_tracking_errors(
-      channels, error_x, error_y, neutral_pwm_, *mission_hold_depth_m_,
-      approach_vision_throttle_weight_);
+    // 완료 허용 영역 안에서도 원래 목적점(0.85, 0.25)을 계속 추종한다.
+    // 정렬 중에는 수심 P도 섞어 양성 부력으로 뜨는 것을 막는다.
+    apply_visual_tracking(
+      channels, *buoy_, buoy_align_target_x_, buoy_align_target_y_, neutral_pwm_,
+      *mission_hold_depth_m_, approach_vision_throttle_weight_);
 
     if (in_alignment_zone) {
       if (!condition_started_at_) {
@@ -976,6 +978,8 @@ private:
   double buoy_same_target_center_ratio_{0.12};
   double fork_target_x_{0.30};
   double fork_target_y_{0.70};
+  double buoy_align_target_x_{0.85};
+  double buoy_align_target_y_{0.25};
   double align_zone_min_x_{0.50};
   double align_zone_max_y_{0.50};
   double align_stable_sec_{0.7};
@@ -986,9 +990,9 @@ private:
   int backoff_pwm_{1420};
   double backoff_duration_sec_{0.5};
   int strong_forward_pwm_{1700};
-  double strong_forward_duration_sec_{0.8};
+  double strong_forward_duration_sec_{1.2};
   int strong_backoff_pwm_{1300};
-  double strong_backoff_duration_sec_{0.8};
+  double strong_backoff_duration_sec_{1.2};
   double verify_clear_sec_{1.0};
   double verify_timeout_sec_{3.0};
   int max_target_retries_{2};

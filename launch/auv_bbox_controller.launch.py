@@ -64,10 +64,20 @@ def generate_launch_description():
             DeclareLaunchArgument("min_detection_hits", default_value="3"),
             DeclareLaunchArgument("target_confirm_hits", default_value="3"),
             DeclareLaunchArgument("target_confirm_sec", default_value="0.2"),
-            DeclareLaunchArgument("approach_area_ratio", default_value="0.05"),
+            DeclareLaunchArgument("approach_area_ratio", default_value="0.005"),
             DeclareLaunchArgument("approach_vision_throttle_weight", default_value="0.4"),
             DeclareLaunchArgument("fork_target_x", default_value="0.30"),
             DeclareLaunchArgument("fork_target_y", default_value="0.70"),
+            DeclareLaunchArgument(
+                "buoy_align_target_x",
+                default_value="0.85",
+                description="Buoy center control target for ALIGN_STICK; 1.0 is the far right.",
+            ),
+            DeclareLaunchArgument(
+                "buoy_align_target_y",
+                default_value="0.25",
+                description="Buoy center control target for ALIGN_STICK; 0.0 is the top.",
+            ),
             DeclareLaunchArgument(
                 "align_zone_min_x",
                 default_value="0.50",
@@ -86,9 +96,9 @@ def generate_launch_description():
             DeclareLaunchArgument("backoff_pwm", default_value="1420"),
             DeclareLaunchArgument("backoff_duration_sec", default_value="0.5"),
             DeclareLaunchArgument("strong_forward_pwm", default_value="1700"),
-            DeclareLaunchArgument("strong_forward_duration_sec", default_value="0.8"),
+            DeclareLaunchArgument("strong_forward_duration_sec", default_value="1.2"),
             DeclareLaunchArgument("strong_backoff_pwm", default_value="1300"),
-            DeclareLaunchArgument("strong_backoff_duration_sec", default_value="0.8"),
+            DeclareLaunchArgument("strong_backoff_duration_sec", default_value="1.2"),
             DeclareLaunchArgument("search_timeout_sec", default_value="40.0"),
             DeclareLaunchArgument("area_verify_sec", default_value="12.0"),
             Node(
@@ -148,6 +158,12 @@ def generate_launch_description():
                         ),
                         "fork_target_y": ParameterValue(
                             LaunchConfiguration("fork_target_y"), value_type=float
+                        ),
+                        "buoy_align_target_x": ParameterValue(
+                            LaunchConfiguration("buoy_align_target_x"), value_type=float
+                        ),
+                        "buoy_align_target_y": ParameterValue(
+                            LaunchConfiguration("buoy_align_target_y"), value_type=float
                         ),
                         "align_zone_min_x": ParameterValue(
                             LaunchConfiguration("align_zone_min_x"), value_type=float
