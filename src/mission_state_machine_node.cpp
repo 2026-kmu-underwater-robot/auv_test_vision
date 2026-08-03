@@ -81,8 +81,8 @@ public:
     fork_target_y_ = declare_parameter<double>("fork_target_y", 0.70);
     // buoy 중심이 이 경계를 넘으면 이미지 오른쪽 위 허용 영역으로 판단한다.
     // x는 오른쪽으로, y는 아래쪽으로 증가한다.
-    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.60);
-    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.40);
+    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.50);
+    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.50);
     align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
 
     // --- 포크 삽입 / 분리 / 후퇴 / 검증 ---
@@ -976,8 +976,8 @@ private:
   double buoy_same_target_center_ratio_{0.12};
   double fork_target_x_{0.30};
   double fork_target_y_{0.70};
-  double align_zone_min_x_{0.60};
-  double align_zone_max_y_{0.40};
+  double align_zone_min_x_{0.50};
+  double align_zone_max_y_{0.50};
   double align_stable_sec_{0.7};
   int insert_pwm_{1560};
   double insert_duration_sec_{0.8};

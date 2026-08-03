@@ -63,7 +63,7 @@ ros2 topic echo /mission/rc_command
 | `reacquire_yaw_pwm` / `reacquire_yaw_duration_sec` | 1470 / 0.5 | TARGET_HOLD 중 bbox 유실 시 역방향 yaw 재탐색 명령 |
 | `reacquire_timeout_sec` | 1.0 | 재탐색 중 bbox가 다시 보이지 않으면 SEARCH로 복귀하는 시간 |
 | `approach_area_ratio` | 0.20 | 이 면적비 이상이면 ALIGN 진입 |
-| `align_zone_min_x` / `align_zone_max_y` | 0.60 / 0.40 | ALIGN 성공 영역: bbox 중심이 `x >= min_x` 이고 `y <= max_y`인 오른쪽 위 영역에 `align_stable_sec` 동안 유지되어야 함 |
+| `align_zone_min_x` / `align_zone_max_y` | 0.50 / 0.50 | ALIGN 성공 영역: bbox 중심이 `x >= min_x` 이고 `y <= max_y`인 오른쪽 위(1사분면) 영역에 `align_stable_sec` 동안 유지되어야 함 |
 | `strong_forward_pwm` / `strong_forward_duration_sec` | 1700 / 0.8 | 정렬 후 강한 전진 |
 | `strong_backoff_pwm` / `strong_backoff_duration_sec` | 1300 / 0.8 | 강한 전진 후 강한 후진 |
 
