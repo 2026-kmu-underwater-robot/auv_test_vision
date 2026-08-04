@@ -5,12 +5,12 @@
 노드 시작 즉시 `target_depth_m`까지 잠항하고 아래 상태를 무한 반복합니다.
 
 ```text
-DIVE -> SEARCH -> TARGET_HOLD -> APPROACH_BUOY -> ALIGN_STICK
-                       |                                  |
-                       | bbox 유실                         v
-                       v                       STRONG_FORWARD -> STRONG_BACKOFF
-                REACQUIRE_BUOY                                  |             |
-                       |                                         +-------------+--> SEARCH
+DIVE -> SEARCH -> TARGET_HOLD -> APPROACH_BUOY
+                       |                  |
+                       | bbox 유실         v
+                       v          STRONG_FORWARD -> STRONG_BACKOFF
+                REACQUIRE_BUOY                         |             |
+                       |                                +-------------+--> SEARCH
                        +-- 1초 내 재검출 실패 --> SEARCH
 ```
 
@@ -64,10 +64,9 @@ ros2 topic echo /mission/rc_command
 | `reacquire_timeout_sec` | 1.0 | 재탐색 중 bbox가 다시 보이지 않으면 SEARCH로 복귀하는 시간 |
 | `yaw_kp_pwm` | 110.0 | 정규화 수평 오차 1.0당 yaw PWM 비례 gain |
 | `max_yaw_delta` | 100 | 중립값에서 허용할 yaw PWM 최대 변화량 |
-| `approach_area_ratio` | 0.10 | 이 면적비 이상이면 ALIGN 진입 |
-| `buoy_align_target_x` / `buoy_align_target_y` | 0.85 / 0.25 | ALIGN 제어가 계속 추종하는 bbox 중심 목표 좌표 |
-| `align_zone_min_x` / `align_zone_max_y` | 0.75 / 0.35 | 강한 전진 전이 허용 영역: bbox 중심이 최종 목표 주변의 좁은 오른쪽 위 영역에 `align_stable_sec` 동안 유지되어야 함 |
-| `align_timeout_sec` | 10.0 | ALIGN 완료 판정에 실패해도 이 시간이 지나면 강제 강한 전진·후진 사이클 수행 |
+| `approach_area_ratio` | 0.10 | 이 면적비 이상이면 전진 중립으로 근접 정렬 유지 시작 |
+| `buoy_align_target_x` / `buoy_align_target_y` | 0.50 / 0.50 | APPROACH가 계속 추종하는 화면 중앙 bbox 목표 좌표 |
+| `approach_close_hold_sec` | 2.0 | 목표 면적 이상을 연속 유지한 뒤 STRONG_FORWARD로 넘어가는 시간 |
 | `strong_forward_pwm` / `strong_forward_duration_sec` | 1700 / 1.2 | 정렬 후 강한 전진 |
 | `strong_backoff_pwm` / `strong_backoff_duration_sec` | 1300 / 1.2 | 강한 전진 후 강한 후진 |
 

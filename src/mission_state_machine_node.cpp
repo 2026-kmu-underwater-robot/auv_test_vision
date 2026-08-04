@@ -2,7 +2,7 @@
 //
 // 비전 bbox + 수심을 받아 MAVROS RC override로 throttle/yaw/forward를 제어한다.
 // 테스트 흐름:
-//   DIVE -> SEARCH -> APPROACH_BUOY -> ALIGN_STICK -> STRONG_FORWARD
+//   DIVE -> SEARCH -> TARGET_HOLD -> APPROACH_BUOY -> STRONG_FORWARD
 //        -> STRONG_BACKOFF -> SEARCH (무한 반복)
 
 #include <algorithm>
@@ -77,18 +77,14 @@ public:
     buoy_same_target_center_ratio_ =
       declare_parameter<double>("buoy_same_target_center_ratio", 0.12);
 
-    // --- 막대(stick) 정렬 ---
+    // --- 접근 중 부표 정렬 ---
     // 이미지 3사분면(왼쪽 아래) 쪽. 끝단이 아닌 대략 (0.30, 0.70)
     fork_target_x_ = declare_parameter<double>("fork_target_x", 0.30);
     fork_target_y_ = declare_parameter<double>("fork_target_y", 0.70);
-    // buoy 중심이 이 경계를 넘으면 이미지 오른쪽 위 허용 영역으로 판단한다.
-    // x는 오른쪽으로, y는 아래쪽으로 증가한다.
-    buoy_align_target_x_ = declare_parameter<double>("buoy_align_target_x", 0.85);
-    buoy_align_target_y_ = declare_parameter<double>("buoy_align_target_y", 0.25);
-    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.75);
-    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.35);
-    align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
-    align_timeout_sec_ = declare_parameter<double>("align_timeout_sec", 10.0);
+    // APPROACH에서 계속 추종할 화면 목표. x는 오른쪽, y는 아래쪽으로 증가한다.
+    buoy_align_target_x_ = declare_parameter<double>("buoy_align_target_x", 0.50);
+    buoy_align_target_y_ = declare_parameter<double>("buoy_align_target_y", 0.50);
+    approach_close_hold_sec_ = declare_parameter<double>("approach_close_hold_sec", 2.0);
 
     // --- 포크 삽입 / 분리 / 후퇴 / 검증 ---
     insert_pwm_ = declare_parameter<int>("insert_pwm", 1560);
@@ -180,7 +176,6 @@ private:
     TARGET_HOLD,     // buoy 검출 즉시 수평 중립으로 정지하고 안정 검출 확인
     REACQUIRE_BUOY,  // target hold 중 유실된 buoy를 짧게 역방향 yaw로 재탐색
     APPROACH_BUOY,   // buoy 중심 추적 + 전진
-    ALIGN_STICK,     // stick을 포크 목표점으로 정밀 정렬
     STRONG_FORWARD,  // 강한 전진 펄스
     STRONG_BACKOFF,  // 강한 후진 펄스 후 SEARCH로 반복
     // 아래 상태들은 원본의 제어 알고리즘/호환 파라미터를 보존한다. 이 테스트 흐름에서는 진입하지 않는다.
@@ -268,13 +263,9 @@ private:
       !std::isfinite(buoy_align_target_x_) || !std::isfinite(buoy_align_target_y_) ||
       buoy_align_target_x_ < 0.0 || buoy_align_target_x_ > 1.0 ||
       buoy_align_target_y_ < 0.0 || buoy_align_target_y_ > 1.0 ||
-      !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
-      align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
-      align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0 ||
-      !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0 ||
-      !std::isfinite(align_timeout_sec_) || align_timeout_sec_ < 0.0)
+      !std::isfinite(approach_close_hold_sec_) || approach_close_hold_sec_ < 0.0)
     {
-      throw std::invalid_argument("invalid alignment target, zone, or stable time");
+      throw std::invalid_argument("invalid approach target or close hold time");
     }
   }
 
@@ -476,9 +467,6 @@ private:
       case State::APPROACH_BUOY:
         run_approach(channels);
         break;
-      case State::ALIGN_STICK:
-        run_align_stick(channels);
-        break;
       case State::STRONG_FORWARD:
         // 원본과 동일한 작업수심 PID를 유지하면서 강한 전진.
         set_neutral_control(channels);
@@ -625,8 +613,8 @@ private:
     }
   }
 
-  // buoy를 화면 중심으로 추적하며 전진(면적 기반 P).
-  // throttle은 비전 상하 + 작업수심 P를 블렌딩. 충분히 가까우면 stick 검출 없이 ALIGN.
+  // buoy를 최종 목표 좌표로 정렬하며 전진(면적 기반 P).
+  // 목표 면적에 도달하면 전진 중립으로 2초간 정렬을 유지한 뒤 STRONG_FORWARD로 전이한다.
   void run_approach(std::array<uint16_t, 18> & channels)
   {
     if (!recent(buoy_)) {
@@ -634,12 +622,21 @@ private:
       transition_to(State::SEARCH, "buoy lost during approach");
       return;
     }
+    const bool close_enough = detection_area_ratio(*buoy_) >= approach_area_ratio_;
+    const int forward_pwm = close_enough ? neutral_pwm_ : approach_forward_pwm_from_area(*buoy_);
     apply_visual_tracking(
-      channels, *buoy_, 0.5, 0.5, approach_forward_pwm_from_area(*buoy_),
+      channels, *buoy_, buoy_align_target_x_, buoy_align_target_y_, forward_pwm,
       yaw_kp_pwm_, max_yaw_delta_,
       *mission_hold_depth_m_, approach_vision_throttle_weight_);
-    if (detection_area_ratio(*buoy_) >= approach_area_ratio_) {
-      transition_to(State::ALIGN_STICK, "close buoy reached approach area ratio");
+
+    if (close_enough) {
+      if (!condition_started_at_) {
+        condition_started_at_ = now();
+      } else if ((now() - *condition_started_at_).seconds() >= approach_close_hold_sec_) {
+        transition_to(State::STRONG_FORWARD, "close buoy held for approach delay");
+      }
+    } else {
+      condition_started_at_.reset();
     }
   }
 
@@ -658,42 +655,6 @@ private:
     return std::clamp(floor_pwm + delta, floor_pwm, approach_forward_pwm_);
   }
 
-  // buoy 중심을 (buoy_align_target_x_, buoy_align_target_y_)로 계속 제어한다.
-  // 별도의 넓은 허용 영역 안에서 align_stable_sec_ 유지 시 STRONG_FORWARD로 전이한다.
-  void run_align_stick(std::array<uint16_t, 18> & channels)
-  {
-    if (!recent(buoy_)) {
-      set_neutral_control(channels);
-      transition_to(State::SEARCH, "buoy lost during fine alignment");
-      return;
-    }
-    const double x = buoy_->center_x / buoy_->image_width;
-    const double y = buoy_->center_y / buoy_->image_height;
-    const bool in_alignment_zone = x >= align_zone_min_x_ && y <= align_zone_max_y_;
-
-    // 완료 허용 영역 안에서도 고정 최종 목표(기본 0.85, 0.25)를 계속 추종한다.
-    // 정렬 중에는 수심 P도 섞어 양성 부력으로 뜨는 것을 막는다.
-    apply_visual_tracking(
-      channels, *buoy_, buoy_align_target_x_, buoy_align_target_y_, neutral_pwm_,
-      yaw_kp_pwm_, max_yaw_delta_,
-      *mission_hold_depth_m_, approach_vision_throttle_weight_);
-
-    if (state_age_sec() >= align_timeout_sec_) {
-      transition_to(State::STRONG_FORWARD, "alignment timeout; forcing forward/backoff cycle");
-      return;
-    }
-
-    if (in_alignment_zone) {
-      if (!condition_started_at_) {
-        condition_started_at_ = now();
-      } else if ((now() - *condition_started_at_).seconds() >= align_stable_sec_) {
-        transition_to(State::STRONG_FORWARD, "alignment zone stable");
-      }
-    } else {
-      condition_started_at_.reset();
-    }
-  }
-
   // 후퇴 후 buoy가 사라지면 성공으로 SEARCH 복귀. 남아 있으면 재시도 또는 포기.
   void run_verify_release(std::array<uint16_t, 18> & channels)
   {
@@ -709,9 +670,7 @@ private:
     if (state_age_sec() >= verify_timeout_sec_) {
       if (target_retries_ < max_target_retries_) {
         ++target_retries_;
-        transition_to(
-          recent(stick_) ? State::ALIGN_STICK : State::APPROACH_BUOY,
-          "target remains; retrying detach");
+        transition_to(State::APPROACH_BUOY, "target remains; retrying approach");
       } else {
         RCLCPP_ERROR(get_logger(), "Target retry limit reached; abandoning this target");
         target_retries_ = 0;
@@ -921,7 +880,6 @@ private:
       case State::TARGET_HOLD: return "TARGET_HOLD";
       case State::REACQUIRE_BUOY: return "REACQUIRE_BUOY";
       case State::APPROACH_BUOY: return "APPROACH_BUOY";
-      case State::ALIGN_STICK: return "ALIGN_STICK";
       case State::STRONG_FORWARD: return "STRONG_FORWARD";
       case State::STRONG_BACKOFF: return "STRONG_BACKOFF";
       case State::INSERT_FORK: return "INSERT_FORK";
@@ -1011,12 +969,9 @@ private:
   double buoy_same_target_center_ratio_{0.12};
   double fork_target_x_{0.30};
   double fork_target_y_{0.70};
-  double buoy_align_target_x_{0.85};
-  double buoy_align_target_y_{0.25};
-  double align_zone_min_x_{0.75};
-  double align_zone_max_y_{0.35};
-  double align_stable_sec_{0.7};
-  double align_timeout_sec_{10.0};
+  double buoy_align_target_x_{0.50};
+  double buoy_align_target_y_{0.50};
+  double approach_close_hold_sec_{2.0};
   int insert_pwm_{1560};
   double insert_duration_sec_{0.8};
   int detach_pwm_{1620};

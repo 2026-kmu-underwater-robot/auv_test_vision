@@ -63,8 +63,8 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("depth_kp", default_value="0.3"),
             DeclareLaunchArgument("depth_ki", default_value="0.05"),
-            DeclareLaunchArgument("depth_kd", default_value="0.04"),
-            DeclareLaunchArgument("depth_bias", default_value="0.1"),
+            DeclareLaunchArgument("depth_kd", default_value="0.02"),
+            DeclareLaunchArgument("depth_bias", default_value="0"),
             DeclareLaunchArgument("depth_integral_limit", default_value="2.0"),
             DeclareLaunchArgument("heave_limit", default_value="0.4"),
             DeclareLaunchArgument("lpf_tau_sec", default_value="0.3"),
@@ -79,29 +79,18 @@ def generate_launch_description():
             DeclareLaunchArgument("fork_target_y", default_value="0.70"),
             DeclareLaunchArgument(
                 "buoy_align_target_x",
-                default_value="0.85",
-                description="Buoy center control target for ALIGN_STICK; 1.0 is the far right.",
+                default_value="0.50",
+                description="Buoy center control target during APPROACH; 1.0 is the far right.",
             ),
             DeclareLaunchArgument(
                 "buoy_align_target_y",
-                default_value="0.25",
-                description="Buoy center control target for ALIGN_STICK; 0.0 is the top.",
+                default_value="0.30",
+                description="Buoy center control target during APPROACH; 0.0 is the top.",
             ),
             DeclareLaunchArgument(
-                "align_zone_min_x",
-                default_value="0.75",
-                description="ALIGN_STICK success zone: buoy center must be at or right of this x.",
-            ),
-            DeclareLaunchArgument(
-                "align_zone_max_y",
-                default_value="0.35",
-                description="ALIGN_STICK success zone: buoy center must be at or above this y.",
-            ),
-            DeclareLaunchArgument("align_stable_sec", default_value="0.7"),
-            DeclareLaunchArgument(
-                "align_timeout_sec",
-                default_value="5.0",
-                description="Force STRONG_FORWARD when ALIGN_STICK exceeds this time.",
+                "approach_close_hold_sec",
+                default_value="2.0",
+                description="Hold close-range alignment for this time before STRONG_FORWARD.",
             ),
             DeclareLaunchArgument("insert_pwm", default_value="1560"),
             DeclareLaunchArgument("insert_duration_sec", default_value="0.8"),
@@ -179,17 +168,8 @@ def generate_launch_description():
                         "buoy_align_target_y": ParameterValue(
                             LaunchConfiguration("buoy_align_target_y"), value_type=float
                         ),
-                        "align_zone_min_x": ParameterValue(
-                            LaunchConfiguration("align_zone_min_x"), value_type=float
-                        ),
-                        "align_zone_max_y": ParameterValue(
-                            LaunchConfiguration("align_zone_max_y"), value_type=float
-                        ),
-                        "align_stable_sec": ParameterValue(
-                            LaunchConfiguration("align_stable_sec"), value_type=float
-                        ),
-                        "align_timeout_sec": ParameterValue(
-                            LaunchConfiguration("align_timeout_sec"), value_type=float
+                        "approach_close_hold_sec": ParameterValue(
+                            LaunchConfiguration("approach_close_hold_sec"), value_type=float
                         ),
                         "insert_pwm": ParameterValue(
                             LaunchConfiguration("insert_pwm"), value_type=int
