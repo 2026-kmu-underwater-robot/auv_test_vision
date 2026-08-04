@@ -22,6 +22,8 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include "auv_test_vision/depth_conversion.hpp"
+
 class MissionStateMachineNode : public rclcpp::Node
 {
 public:
@@ -267,7 +269,16 @@ private:
 
   void on_depth_pose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
   {
-    accept_depth(depth_pose_scale_ * msg->pose.pose.position.z + depth_pose_offset_m_);
+    const double converted_depth_m =
+      depth_pose_scale_ * msg->pose.pose.position.z + depth_pose_offset_m_;
+    if (std::isfinite(converted_depth_m) && converted_depth_m < 0.0) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 10000,
+        "Depth pose is %.3f m above the configured reference; clamping depth to 0 m.",
+        -converted_depth_m);
+    }
+    accept_depth(auv_test_vision::pose_z_to_positive_down_depth(
+      msg->pose.pose.position.z, depth_pose_scale_, depth_pose_offset_m_));
   }
 
   // 수심은 양의 하방[m]. 비정상 값은 무시한다. 연속 샘플은 LPF로 완화.

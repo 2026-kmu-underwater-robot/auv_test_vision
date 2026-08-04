@@ -31,7 +31,7 @@ def generate_launch_description():
             DeclareLaunchArgument("annotated_jpeg_quality", default_value="80"),
             DeclareLaunchArgument(
                 "model_path",
-                default_value="",
+                default_value="/home/auv/catkin_ws/src/auv_test_vision/best.pt",
                 description="Required .pt model path. Example: /home/user/models/yolo26m_underwater_batch4_last.pt",
             ),
             DeclareLaunchArgument(
@@ -53,7 +53,7 @@ def generate_launch_description():
             DeclareLaunchArgument("imgsz", default_value="640"),
             DeclareLaunchArgument(
                 "show_preview",
-                default_value="true",
+                default_value="false",
                 description="Show OpenCV preview window with live detections.",
             ),
             DeclareLaunchArgument(

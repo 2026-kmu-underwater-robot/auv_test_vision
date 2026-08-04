@@ -11,12 +11,20 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_depth_conversion test/test_depth_conversion.cpp)
+  target_include_directories(test_depth_conversion PRIVATE include)
+endif()
+
 add_executable(bbox_controller_node src/bbox_controller_node.cpp)
 target_compile_features(bbox_controller_node PUBLIC cxx_std_17)
 ament_target_dependencies(bbox_controller_node rclcpp std_msgs mavros_msgs)
 
 add_executable(mission_state_machine_node src/mission_state_machine_node.cpp)
 target_compile_features(mission_state_machine_node PUBLIC cxx_std_17)
+target_include_directories(mission_state_machine_node PRIVATE include)
 ament_target_dependencies(mission_state_machine_node geometry_msgs rclcpp std_msgs mavros_msgs)
 
 install(PROGRAMS
