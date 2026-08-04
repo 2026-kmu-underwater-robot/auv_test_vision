@@ -32,7 +32,16 @@ def generate_launch_description():
                 description="Maximum thruster PWM command.",
             ),
             # 아래 기본값은 mission_state_machine_node.cpp declare_parameter 와 동기화
-            DeclareLaunchArgument("max_yaw_delta", default_value="180"),
+            DeclareLaunchArgument(
+                "yaw_kp_pwm",
+                default_value="100.0",
+                description="Yaw proportional gain in PWM per normalized horizontal error.",
+            ),
+            DeclareLaunchArgument(
+                "max_yaw_delta",
+                default_value="100",
+                description="Absolute safety limit for yaw PWM deviation from neutral.",
+            ),
             DeclareLaunchArgument(
                 "forward_pwm",
                 default_value="1700",
@@ -64,7 +73,7 @@ def generate_launch_description():
             DeclareLaunchArgument("min_detection_hits", default_value="3"),
             DeclareLaunchArgument("target_confirm_hits", default_value="3"),
             DeclareLaunchArgument("target_confirm_sec", default_value="0.2"),
-            DeclareLaunchArgument("approach_area_ratio", default_value="0.40"),
+            DeclareLaunchArgument("approach_area_ratio", default_value="0.10"),
             DeclareLaunchArgument("approach_vision_throttle_weight", default_value="0.4"),
             DeclareLaunchArgument("fork_target_x", default_value="0.30"),
             DeclareLaunchArgument("fork_target_y", default_value="0.70"),
@@ -87,6 +96,16 @@ def generate_launch_description():
                 "align_zone_max_y",
                 default_value="0.50",
                 description="ALIGN_STICK success zone: buoy center must be at or above this y.",
+            ),
+            DeclareLaunchArgument(
+                "align_target_ramp_sec",
+                default_value="2.0",
+                description="Minimum time to move the ALIGN target from image center to its final point.",
+            ),
+            DeclareLaunchArgument(
+                "align_target_follow_tolerance",
+                default_value="0.10",
+                description="Pause ALIGN target movement while bbox error exceeds this normalized tolerance.",
             ),
             DeclareLaunchArgument("align_stable_sec", default_value="0.7"),
             DeclareLaunchArgument("insert_pwm", default_value="1560"),
@@ -171,6 +190,13 @@ def generate_launch_description():
                         "align_zone_max_y": ParameterValue(
                             LaunchConfiguration("align_zone_max_y"), value_type=float
                         ),
+                        "align_target_ramp_sec": ParameterValue(
+                            LaunchConfiguration("align_target_ramp_sec"), value_type=float
+                        ),
+                        "align_target_follow_tolerance": ParameterValue(
+                            LaunchConfiguration("align_target_follow_tolerance"),
+                            value_type=float,
+                        ),
                         "align_stable_sec": ParameterValue(
                             LaunchConfiguration("align_stable_sec"), value_type=float
                         ),
@@ -248,6 +274,9 @@ def generate_launch_description():
                         ),
                         "max_pwm": ParameterValue(
                             LaunchConfiguration("max_pwm"), value_type=int
+                        ),
+                        "yaw_kp_pwm": ParameterValue(
+                            LaunchConfiguration("yaw_kp_pwm"), value_type=float
                         ),
                         "max_yaw_delta": ParameterValue(
                             LaunchConfiguration("max_yaw_delta"), value_type=int

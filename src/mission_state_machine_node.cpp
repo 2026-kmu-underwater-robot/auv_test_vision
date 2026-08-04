@@ -45,9 +45,9 @@ public:
     // --- 제어 주기 / 타임아웃 / 수심 ---
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 20.0);
     detection_timeout_sec_ = declare_parameter<double>("detection_timeout_sec", 1.0);
-    surface_depth_m_ = declare_parameter<double>("surface_depth_m", 0.4);
+    surface_depth_m_ = declare_parameter<double>("surface_depth_m", 0.0);
     // 핸드셰이크 인계 수심 대신, 노드 시작 시 이 목표 수심으로 즉시 잠항한다.
-    target_depth_m_ = declare_parameter<double>("target_depth_m", 1.0);
+    target_depth_m_ = declare_parameter<double>("target_depth_m", 0.05);
     depth_tolerance_m_ = declare_parameter<double>("depth_tolerance_m", 0.2);
     // Hydrophone 제어기와 같은 PID 구조. 수심은 positive-down이므로 양의 오차는 하강 명령이다.
     depth_kp_ = declare_parameter<double>("depth_kp", 0.3);
@@ -67,7 +67,7 @@ public:
     target_confirm_hits_ = declare_parameter<int>("target_confirm_hits", 3);
     target_confirm_sec_ = declare_parameter<double>("target_confirm_sec", 0.2);
     // bbox 면적 / 이미지 면적 비율이 이 값 이상이면 "충분히 가까움"으로 판단
-    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.20);
+    approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.10);
     search_timeout_sec_ = declare_parameter<double>("search_timeout_sec", 40.0);
     area_verify_sec_ = declare_parameter<double>("area_verify_sec", 12.0);
     // SEARCH 다중 부표 선택: 면적 비슷 판정 / confidence 비슷 판정 / 동일 타깃 판정
@@ -87,6 +87,9 @@ public:
     buoy_align_target_y_ = declare_parameter<double>("buoy_align_target_y", 0.25);
     align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.50);
     align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.50);
+    align_target_ramp_sec_ = declare_parameter<double>("align_target_ramp_sec", 2.0);
+    align_target_follow_tolerance_ =
+      declare_parameter<double>("align_target_follow_tolerance", 0.10);
     align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
 
     // --- 포크 삽입 / 분리 / 후퇴 / 검증 ---
@@ -112,7 +115,10 @@ public:
     neutral_pwm_ = declare_parameter<int>("neutral_pwm", 1500);
     min_pwm_ = declare_parameter<int>("min_pwm", 1300);
     max_pwm_ = declare_parameter<int>("max_pwm", 1700);
-    max_yaw_delta_ = declare_parameter<int>("max_yaw_delta", 180);
+    // 정규화 수평 오차 1.0당 적용할 yaw PWM 비례 gain.
+    yaw_kp_pwm_ = declare_parameter<double>("yaw_kp_pwm", 110.0);
+    // gain 계산 결과에 적용하는 최종 yaw PWM 변화량 제한.
+    max_yaw_delta_ = declare_parameter<int>("max_yaw_delta", 100);
     max_tracking_depth_delta_ = declare_parameter<int>("max_tracking_depth_delta", 100);
     // APPROACH 전진 최대/최소 PWM. 멀리서 max, 가까워질수록 min까지 선형(P) 감속
     approach_forward_pwm_ = declare_parameter<int>("approach_forward_pwm", 1700);
@@ -120,7 +126,7 @@ public:
     // APPROACH/ALIGN throttle: 1=비전만, 0=수심 P만. 기본 0.4는 수심 쪽에 조금 더 무게
     approach_vision_throttle_weight_ =
       declare_parameter<double>("approach_vision_throttle_weight", 0.4);
-    search_yaw_pwm_ = declare_parameter<int>("search_yaw_pwm", 1530);
+    search_yaw_pwm_ = declare_parameter<int>("search_yaw_pwm", 1560);
     search_forward_pwm_ = declare_parameter<int>("search_forward_pwm", 1520);
     reacquire_yaw_pwm_ = declare_parameter<int>("reacquire_yaw_pwm", 1470);
     reacquire_yaw_duration_sec_ =
@@ -255,12 +261,21 @@ private:
       throw std::invalid_argument("invalid acoustic-vision handshake confirmation parameters");
     }
     if (
+      !std::isfinite(yaw_kp_pwm_) || yaw_kp_pwm_ < 0.0 ||
+      max_yaw_delta_ < 0 || max_tracking_depth_delta_ < 0)
+    {
+      throw std::invalid_argument("invalid visual tracking gain or output limit");
+    }
+    if (
       !std::isfinite(buoy_align_target_x_) || !std::isfinite(buoy_align_target_y_) ||
       buoy_align_target_x_ < 0.0 || buoy_align_target_x_ > 1.0 ||
       buoy_align_target_y_ < 0.0 || buoy_align_target_y_ > 1.0 ||
       !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
       align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
       align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0 ||
+      !std::isfinite(align_target_ramp_sec_) || align_target_ramp_sec_ < 0.0 ||
+      !std::isfinite(align_target_follow_tolerance_) ||
+      align_target_follow_tolerance_ < 0.0 || align_target_follow_tolerance_ > 1.0 ||
       !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0)
     {
       throw std::invalid_argument("invalid alignment target, zone, or stable time");
@@ -625,6 +640,7 @@ private:
     }
     apply_visual_tracking(
       channels, *buoy_, 0.5, 0.5, approach_forward_pwm_from_area(*buoy_),
+      yaw_kp_pwm_, max_yaw_delta_,
       *mission_hold_depth_m_, approach_vision_throttle_weight_);
     if (detection_area_ratio(*buoy_) >= approach_area_ratio_) {
       transition_to(State::ALIGN_STICK, "close buoy reached approach area ratio");
@@ -659,13 +675,42 @@ private:
     const double y = buoy_->center_y / buoy_->image_height;
     const bool in_alignment_zone = x >= align_zone_min_x_ && y <= align_zone_max_y_;
 
-    // 완료 허용 영역 안에서도 원래 목적점(0.85, 0.25)을 계속 추종한다.
-    // 정렬 중에는 수심 P도 섞어 양성 부력으로 뜨는 것을 막는다.
+    // APPROACH의 중심 목표(0.5, 0.5)에서 ALIGN 최종 목표까지 smoothstep으로 이동한다.
+    // bbox가 현재 이동 목표를 따라오지 못하면 진행률을 멈춰 오차가 계속 커지는 것을 막는다.
+    const auto current_time = now();
+    const double dt = std::clamp(
+      (current_time - align_target_last_update_at_).seconds(), 0.0, 0.2);
+    align_target_last_update_at_ = current_time;
+    const double progress = std::clamp(align_target_progress_, 0.0, 1.0);
+    const double smooth_progress = progress * progress * (3.0 - 2.0 * progress);
+    const double moving_target_x =
+      0.5 + (buoy_align_target_x_ - 0.5) * smooth_progress;
+    const double moving_target_y =
+      0.5 + (buoy_align_target_y_ - 0.5) * smooth_progress;
+    const bool following_moving_target =
+      std::abs(x - moving_target_x) <= align_target_follow_tolerance_ &&
+      std::abs(y - moving_target_y) <= align_target_follow_tolerance_;
+
+    // 이동 중인 목적점을 추종하며 정렬 중에도 수심 P를 섞어 양성 부력으로 뜨는 것을 막는다.
     apply_visual_tracking(
-      channels, *buoy_, buoy_align_target_x_, buoy_align_target_y_, neutral_pwm_,
+      channels, *buoy_, moving_target_x, moving_target_y, neutral_pwm_,
+      yaw_kp_pwm_, max_yaw_delta_,
       *mission_hold_depth_m_, approach_vision_throttle_weight_);
 
-    if (in_alignment_zone) {
+    if (following_moving_target && align_target_progress_ < 1.0) {
+      if (align_target_ramp_sec_ <= 1e-9) {
+        align_target_progress_ = 1.0;
+      } else {
+        align_target_progress_ = std::min(
+          1.0, align_target_progress_ + dt / align_target_ramp_sec_);
+      }
+    }
+
+    const bool ramp_complete = align_target_progress_ >= 1.0;
+    const bool near_final_target =
+      std::abs(x - buoy_align_target_x_) <= align_target_follow_tolerance_ &&
+      std::abs(y - buoy_align_target_y_) <= align_target_follow_tolerance_;
+    if (ramp_complete && near_final_target && in_alignment_zone) {
       if (!condition_started_at_) {
         condition_started_at_ = now();
       } else if ((now() - *condition_started_at_).seconds() >= align_stable_sec_) {
@@ -735,25 +780,29 @@ private:
   void apply_visual_tracking(
     std::array<uint16_t, 18> & channels, const Detection & detection,
     double target_x, double target_y, int forward_pwm,
+    double yaw_kp_pwm, int max_yaw_delta,
     std::optional<double> depth_blend_target_m = std::nullopt,
     double vision_throttle_weight = 1.0)
   {
     const auto [error_x, error_y] = normalized_error(detection, target_x, target_y);
     apply_tracking_errors(
-      channels, error_x, error_y, forward_pwm, depth_blend_target_m, vision_throttle_weight);
+      channels, error_x, error_y, forward_pwm, yaw_kp_pwm, max_yaw_delta,
+      depth_blend_target_m, vision_throttle_weight);
   }
 
   void apply_tracking_errors(
     std::array<uint16_t, 18> & channels, double error_x, double error_y, int forward_pwm,
+    double yaw_kp_pwm, int max_yaw_delta,
     std::optional<double> depth_blend_target_m = std::nullopt,
     double vision_throttle_weight = 1.0)
   {
     set_neutral_control(channels);
     const double yaw_sign = yaw_invert_ ? -1.0 : 1.0;
     const double vertical_sign = vertical_positive_is_up_ ? -1.0 : 1.0;
-    set_channel(
-      channels, yaw_channel_,
-      neutral_pwm_ + static_cast<int>(yaw_sign * error_x * max_yaw_delta_));
+    const int yaw_delta = std::clamp(
+      static_cast<int>(std::lround(yaw_sign * error_x * yaw_kp_pwm)),
+      -max_yaw_delta, max_yaw_delta);
+    set_channel(channels, yaw_channel_, neutral_pwm_ + yaw_delta);
 
     const int vision_throttle =
       neutral_pwm_ + static_cast<int>(vertical_sign * error_y * max_tracking_depth_delta_);
@@ -872,6 +921,10 @@ private:
     state_ = next;
     state_entered_at_ = now();
     condition_started_at_.reset();
+    if (next == State::ALIGN_STICK) {
+      align_target_progress_ = align_target_ramp_sec_ <= 1e-9 ? 1.0 : 0.0;
+      align_target_last_update_at_ = state_entered_at_;
+    }
     if (next == State::ASCEND || next == State::COMPLETE) {
       reset_depth_pid();
     }
@@ -965,8 +1018,8 @@ private:
   std::string rc_monitor_topic_;
   double control_rate_hz_{20.0};
   double detection_timeout_sec_{1.0};
-  double surface_depth_m_{0.4};
-  double target_depth_m_{1.0};
+  double surface_depth_m_{0.0};
+  double target_depth_m_{0.05};
   double depth_tolerance_m_{0.2};
   double depth_kp_{0.3};
   double depth_ki_{0.05};
@@ -981,7 +1034,7 @@ private:
   int min_detection_hits_{3};
   int target_confirm_hits_{3};
   double target_confirm_sec_{0.2};
-  double approach_area_ratio_{0.20};
+  double approach_area_ratio_{0.10};
   double search_timeout_sec_{40.0};
   double area_verify_sec_{12.0};
   double buoy_area_similar_ratio_{0.15};
@@ -993,6 +1046,8 @@ private:
   double buoy_align_target_y_{0.25};
   double align_zone_min_x_{0.50};
   double align_zone_max_y_{0.50};
+  double align_target_ramp_sec_{2.0};
+  double align_target_follow_tolerance_{0.10};
   double align_stable_sec_{0.7};
   int insert_pwm_{1560};
   double insert_duration_sec_{0.8};
@@ -1013,12 +1068,13 @@ private:
   int neutral_pwm_{1500};
   int min_pwm_{1300};
   int max_pwm_{1700};
-  int max_yaw_delta_{180};
+  double yaw_kp_pwm_{110.0};
+  int max_yaw_delta_{100};
   int max_tracking_depth_delta_{100};
   int approach_forward_pwm_{1700};
   int approach_forward_min_pwm_{1560};
   double approach_vision_throttle_weight_{0.4};
-  int search_yaw_pwm_{1530};
+  int search_yaw_pwm_{1560};
   int search_forward_pwm_{1520};
   int reacquire_yaw_pwm_{1470};
   double reacquire_yaw_duration_sec_{0.5};
@@ -1035,6 +1091,8 @@ private:
   std::optional<double> depth_m_;
   rclcpp::Time depth_received_at_{0, 0, RCL_ROS_TIME};
   std::optional<double> mission_hold_depth_m_;
+  double align_target_progress_{0.0};
+  rclcpp::Time align_target_last_update_at_{0, 0, RCL_ROS_TIME};
   bool depth_pid_initialized_{false};
   rclcpp::Time last_depth_control_time_{0, 0, RCL_ROS_TIME};
   double previous_depth_error_m_{0.0};

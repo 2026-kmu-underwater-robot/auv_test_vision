@@ -58,14 +58,25 @@ ros2 topic echo /mission/rc_command
 
 | 파라미터 | 기본값 | 의미 |
 |---|---:|---|
-| `target_depth_m` | 1.0 | 시작 직후 내려갈 목표 수심(m, positive-down) |
-| `search_yaw_pwm` / `search_forward_pwm` | 1530 / 1520 | SEARCH 탐색 명령 |
+| `target_depth_m` | 0.05 | 시작 직후 내려갈 목표 수심(m, positive-down) |
+| `search_yaw_pwm` / `search_forward_pwm` | 1560 / 1520 | SEARCH 탐색 명령 |
 | `reacquire_yaw_pwm` / `reacquire_yaw_duration_sec` | 1470 / 0.5 | TARGET_HOLD 중 bbox 유실 시 역방향 yaw 재탐색 명령 |
 | `reacquire_timeout_sec` | 1.0 | 재탐색 중 bbox가 다시 보이지 않으면 SEARCH로 복귀하는 시간 |
-| `approach_area_ratio` | 0.20 | 이 면적비 이상이면 ALIGN 진입 |
+| `yaw_kp_pwm` | 110.0 | 정규화 수평 오차 1.0당 yaw PWM 비례 gain |
+| `max_yaw_delta` | 100 | 중립값에서 허용할 yaw PWM 최대 변화량 |
+| `approach_area_ratio` | 0.10 | 이 면적비 이상이면 ALIGN 진입 |
 | `buoy_align_target_x` / `buoy_align_target_y` | 0.85 / 0.25 | ALIGN 제어가 계속 추종하는 bbox 중심 목표 좌표 |
 | `align_zone_min_x` / `align_zone_max_y` | 0.50 / 0.50 | 강한 전진 전이 허용 영역: bbox 중심이 오른쪽 위(1사분면)에 `align_stable_sec` 동안 유지되어야 함 |
+| `align_target_ramp_sec` | 2.0 | ALIGN 목표를 화면 중앙에서 최종 좌표까지 이동시키는 최소 시간 |
+| `align_target_follow_tolerance` | 0.10 | bbox가 이동 목표에서 이 값보다 멀어지면 목표 좌표 이동을 일시 정지 |
 | `strong_forward_pwm` / `strong_forward_duration_sec` | 1700 / 1.2 | 정렬 후 강한 전진 |
 | `strong_backoff_pwm` / `strong_backoff_duration_sec` | 1300 / 1.2 | 강한 전진 후 강한 후진 |
 
 수심 입력은 `geometry_msgs/msg/PoseWithCovarianceStamped`이고 기본 변환은 `depth = -pose.position.z`입니다. RC 출력은 Ch3 throttle, Ch4 yaw, Ch5 forward이며, 실제 투입 전 PWM 방향과 수심 부호를 반드시 확인해야 합니다.
+
+급회전이 크면 다음처럼 gain과 최대 변화량을 낮춰 실행할 수 있습니다.
+
+```bash
+ros2 launch auv_test_vision auv_bbox_controller.launch.py \
+  yaw_kp_pwm:=70.0 max_yaw_delta:=90
+```
