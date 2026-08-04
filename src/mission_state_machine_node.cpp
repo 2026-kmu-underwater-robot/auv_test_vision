@@ -85,12 +85,10 @@ public:
     // x는 오른쪽으로, y는 아래쪽으로 증가한다.
     buoy_align_target_x_ = declare_parameter<double>("buoy_align_target_x", 0.85);
     buoy_align_target_y_ = declare_parameter<double>("buoy_align_target_y", 0.25);
-    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.50);
-    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.50);
-    align_target_ramp_sec_ = declare_parameter<double>("align_target_ramp_sec", 2.0);
-    align_target_follow_tolerance_ =
-      declare_parameter<double>("align_target_follow_tolerance", 0.10);
+    align_zone_min_x_ = declare_parameter<double>("align_zone_min_x", 0.75);
+    align_zone_max_y_ = declare_parameter<double>("align_zone_max_y", 0.35);
     align_stable_sec_ = declare_parameter<double>("align_stable_sec", 0.7);
+    align_timeout_sec_ = declare_parameter<double>("align_timeout_sec", 10.0);
 
     // --- 포크 삽입 / 분리 / 후퇴 / 검증 ---
     insert_pwm_ = declare_parameter<int>("insert_pwm", 1560);
@@ -273,10 +271,8 @@ private:
       !std::isfinite(align_zone_min_x_) || !std::isfinite(align_zone_max_y_) ||
       align_zone_min_x_ < 0.0 || align_zone_min_x_ > 1.0 ||
       align_zone_max_y_ < 0.0 || align_zone_max_y_ > 1.0 ||
-      !std::isfinite(align_target_ramp_sec_) || align_target_ramp_sec_ < 0.0 ||
-      !std::isfinite(align_target_follow_tolerance_) ||
-      align_target_follow_tolerance_ < 0.0 || align_target_follow_tolerance_ > 1.0 ||
-      !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0)
+      !std::isfinite(align_stable_sec_) || align_stable_sec_ < 0.0 ||
+      !std::isfinite(align_timeout_sec_) || align_timeout_sec_ < 0.0)
     {
       throw std::invalid_argument("invalid alignment target, zone, or stable time");
     }
@@ -675,42 +671,19 @@ private:
     const double y = buoy_->center_y / buoy_->image_height;
     const bool in_alignment_zone = x >= align_zone_min_x_ && y <= align_zone_max_y_;
 
-    // APPROACH의 중심 목표(0.5, 0.5)에서 ALIGN 최종 목표까지 smoothstep으로 이동한다.
-    // bbox가 현재 이동 목표를 따라오지 못하면 진행률을 멈춰 오차가 계속 커지는 것을 막는다.
-    const auto current_time = now();
-    const double dt = std::clamp(
-      (current_time - align_target_last_update_at_).seconds(), 0.0, 0.2);
-    align_target_last_update_at_ = current_time;
-    const double progress = std::clamp(align_target_progress_, 0.0, 1.0);
-    const double smooth_progress = progress * progress * (3.0 - 2.0 * progress);
-    const double moving_target_x =
-      0.5 + (buoy_align_target_x_ - 0.5) * smooth_progress;
-    const double moving_target_y =
-      0.5 + (buoy_align_target_y_ - 0.5) * smooth_progress;
-    const bool following_moving_target =
-      std::abs(x - moving_target_x) <= align_target_follow_tolerance_ &&
-      std::abs(y - moving_target_y) <= align_target_follow_tolerance_;
-
-    // 이동 중인 목적점을 추종하며 정렬 중에도 수심 P를 섞어 양성 부력으로 뜨는 것을 막는다.
+    // 완료 허용 영역 안에서도 고정 최종 목표(기본 0.85, 0.25)를 계속 추종한다.
+    // 정렬 중에는 수심 P도 섞어 양성 부력으로 뜨는 것을 막는다.
     apply_visual_tracking(
-      channels, *buoy_, moving_target_x, moving_target_y, neutral_pwm_,
+      channels, *buoy_, buoy_align_target_x_, buoy_align_target_y_, neutral_pwm_,
       yaw_kp_pwm_, max_yaw_delta_,
       *mission_hold_depth_m_, approach_vision_throttle_weight_);
 
-    if (following_moving_target && align_target_progress_ < 1.0) {
-      if (align_target_ramp_sec_ <= 1e-9) {
-        align_target_progress_ = 1.0;
-      } else {
-        align_target_progress_ = std::min(
-          1.0, align_target_progress_ + dt / align_target_ramp_sec_);
-      }
+    if (state_age_sec() >= align_timeout_sec_) {
+      transition_to(State::STRONG_FORWARD, "alignment timeout; forcing forward/backoff cycle");
+      return;
     }
 
-    const bool ramp_complete = align_target_progress_ >= 1.0;
-    const bool near_final_target =
-      std::abs(x - buoy_align_target_x_) <= align_target_follow_tolerance_ &&
-      std::abs(y - buoy_align_target_y_) <= align_target_follow_tolerance_;
-    if (ramp_complete && near_final_target && in_alignment_zone) {
+    if (in_alignment_zone) {
       if (!condition_started_at_) {
         condition_started_at_ = now();
       } else if ((now() - *condition_started_at_).seconds() >= align_stable_sec_) {
@@ -921,10 +894,6 @@ private:
     state_ = next;
     state_entered_at_ = now();
     condition_started_at_.reset();
-    if (next == State::ALIGN_STICK) {
-      align_target_progress_ = align_target_ramp_sec_ <= 1e-9 ? 1.0 : 0.0;
-      align_target_last_update_at_ = state_entered_at_;
-    }
     if (next == State::ASCEND || next == State::COMPLETE) {
       reset_depth_pid();
     }
@@ -1044,11 +1013,10 @@ private:
   double fork_target_y_{0.70};
   double buoy_align_target_x_{0.85};
   double buoy_align_target_y_{0.25};
-  double align_zone_min_x_{0.50};
-  double align_zone_max_y_{0.50};
-  double align_target_ramp_sec_{2.0};
-  double align_target_follow_tolerance_{0.10};
+  double align_zone_min_x_{0.75};
+  double align_zone_max_y_{0.35};
   double align_stable_sec_{0.7};
+  double align_timeout_sec_{10.0};
   int insert_pwm_{1560};
   double insert_duration_sec_{0.8};
   int detach_pwm_{1620};
@@ -1091,8 +1059,6 @@ private:
   std::optional<double> depth_m_;
   rclcpp::Time depth_received_at_{0, 0, RCL_ROS_TIME};
   std::optional<double> mission_hold_depth_m_;
-  double align_target_progress_{0.0};
-  rclcpp::Time align_target_last_update_at_{0, 0, RCL_ROS_TIME};
   bool depth_pid_initialized_{false};
   rclcpp::Time last_depth_control_time_{0, 0, RCL_ROS_TIME};
   double previous_depth_error_m_{0.0};

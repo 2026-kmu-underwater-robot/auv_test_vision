@@ -66,9 +66,8 @@ ros2 topic echo /mission/rc_command
 | `max_yaw_delta` | 100 | 중립값에서 허용할 yaw PWM 최대 변화량 |
 | `approach_area_ratio` | 0.10 | 이 면적비 이상이면 ALIGN 진입 |
 | `buoy_align_target_x` / `buoy_align_target_y` | 0.85 / 0.25 | ALIGN 제어가 계속 추종하는 bbox 중심 목표 좌표 |
-| `align_zone_min_x` / `align_zone_max_y` | 0.50 / 0.50 | 강한 전진 전이 허용 영역: bbox 중심이 오른쪽 위(1사분면)에 `align_stable_sec` 동안 유지되어야 함 |
-| `align_target_ramp_sec` | 2.0 | ALIGN 목표를 화면 중앙에서 최종 좌표까지 이동시키는 최소 시간 |
-| `align_target_follow_tolerance` | 0.10 | bbox가 이동 목표에서 이 값보다 멀어지면 목표 좌표 이동을 일시 정지 |
+| `align_zone_min_x` / `align_zone_max_y` | 0.75 / 0.35 | 강한 전진 전이 허용 영역: bbox 중심이 최종 목표 주변의 좁은 오른쪽 위 영역에 `align_stable_sec` 동안 유지되어야 함 |
+| `align_timeout_sec` | 10.0 | ALIGN 완료 판정에 실패해도 이 시간이 지나면 강제 강한 전진·후진 사이클 수행 |
 | `strong_forward_pwm` / `strong_forward_duration_sec` | 1700 / 1.2 | 정렬 후 강한 전진 |
 | `strong_backoff_pwm` / `strong_backoff_duration_sec` | 1300 / 1.2 | 강한 전진 후 강한 후진 |
 

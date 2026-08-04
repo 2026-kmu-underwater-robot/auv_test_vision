@@ -89,25 +89,20 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "align_zone_min_x",
-                default_value="0.50",
+                default_value="0.75",
                 description="ALIGN_STICK success zone: buoy center must be at or right of this x.",
             ),
             DeclareLaunchArgument(
                 "align_zone_max_y",
-                default_value="0.50",
+                default_value="0.35",
                 description="ALIGN_STICK success zone: buoy center must be at or above this y.",
             ),
-            DeclareLaunchArgument(
-                "align_target_ramp_sec",
-                default_value="2.0",
-                description="Minimum time to move the ALIGN target from image center to its final point.",
-            ),
-            DeclareLaunchArgument(
-                "align_target_follow_tolerance",
-                default_value="0.10",
-                description="Pause ALIGN target movement while bbox error exceeds this normalized tolerance.",
-            ),
             DeclareLaunchArgument("align_stable_sec", default_value="0.7"),
+            DeclareLaunchArgument(
+                "align_timeout_sec",
+                default_value="10.0",
+                description="Force STRONG_FORWARD when ALIGN_STICK exceeds this time.",
+            ),
             DeclareLaunchArgument("insert_pwm", default_value="1560"),
             DeclareLaunchArgument("insert_duration_sec", default_value="0.8"),
             DeclareLaunchArgument("detach_pwm", default_value="1620"),
@@ -190,15 +185,11 @@ def generate_launch_description():
                         "align_zone_max_y": ParameterValue(
                             LaunchConfiguration("align_zone_max_y"), value_type=float
                         ),
-                        "align_target_ramp_sec": ParameterValue(
-                            LaunchConfiguration("align_target_ramp_sec"), value_type=float
-                        ),
-                        "align_target_follow_tolerance": ParameterValue(
-                            LaunchConfiguration("align_target_follow_tolerance"),
-                            value_type=float,
-                        ),
                         "align_stable_sec": ParameterValue(
                             LaunchConfiguration("align_stable_sec"), value_type=float
+                        ),
+                        "align_timeout_sec": ParameterValue(
+                            LaunchConfiguration("align_timeout_sec"), value_type=float
                         ),
                         "insert_pwm": ParameterValue(
                             LaunchConfiguration("insert_pwm"), value_type=int
