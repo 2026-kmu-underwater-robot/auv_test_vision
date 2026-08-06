@@ -12,6 +12,21 @@ def generate_launch_description():
             DeclareLaunchArgument("depth_pose_topic", default_value="/depth/pose"),
             DeclareLaunchArgument("depth_pose_scale", default_value="-1.0"),
             DeclareLaunchArgument("depth_pose_offset_m", default_value="0.0"),
+            # Acoustic 요청 -> Vision 타깃 확인 -> Acoustic 제어권 승인
+            DeclareLaunchArgument(
+                "vision_search_request_topic",
+                default_value="/homing/vision_search_active",
+            ),
+            DeclareLaunchArgument(
+                "target_confirmed_topic", default_value="/vision/target_confirmed"
+            ),
+            DeclareLaunchArgument(
+                "vision_control_granted_topic",
+                default_value="/homing/vision_control_granted",
+            ),
+            DeclareLaunchArgument(
+                "homing_timeout_topic", default_value="/homing/timeout"
+            ),
             DeclareLaunchArgument("state_topic", default_value="/mission/state"),
             DeclareLaunchArgument("rc_override_topic", default_value="/mavros/rc/override"),
             DeclareLaunchArgument("rc_monitor_topic", default_value="/mission/rc_command"),
@@ -49,18 +64,21 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("approach_forward_min_pwm", default_value="1560"),
             DeclareLaunchArgument("search_yaw_pwm", default_value="1560"),
-            DeclareLaunchArgument("search_forward_pwm", default_value="1520"),
+            DeclareLaunchArgument("search_yaw_duration_sec", default_value="10.0"),
+            DeclareLaunchArgument("search_forward_pwm", default_value="1700"),
+            DeclareLaunchArgument("search_forward_duration_sec", default_value="5.0"),
+            DeclareLaunchArgument("search_recovery_yaw_pwm", default_value="1440"),
+            DeclareLaunchArgument("search_recovery_yaw_duration_sec", default_value="5.0"),
+            DeclareLaunchArgument("search_recovery_forward_pwm", default_value="1700"),
+            DeclareLaunchArgument("search_recovery_forward_duration_sec", default_value="5.0"),
+            DeclareLaunchArgument("once_search_yaw_pwm", default_value="1560"),
+            DeclareLaunchArgument("once_search_duration_sec", default_value="10.0"),
             DeclareLaunchArgument("reacquire_yaw_pwm", default_value="1470"),
             DeclareLaunchArgument("reacquire_yaw_duration_sec", default_value="0.5"),
             DeclareLaunchArgument("reacquire_timeout_sec", default_value="1.0"),
             DeclareLaunchArgument("yaw_invert", default_value="false"),
             DeclareLaunchArgument("vertical_positive_is_up", default_value="true"),
             DeclareLaunchArgument("surface_depth_m", default_value="0.0"),
-            DeclareLaunchArgument(
-                "target_depth_m",
-                default_value="0.05",
-                description="Depth reached immediately after node startup (positive-down, m).",
-            ),
             DeclareLaunchArgument("depth_kp", default_value="0.3"),
             DeclareLaunchArgument("depth_ki", default_value="0.05"),
             DeclareLaunchArgument("depth_kd", default_value="0.02"),
@@ -101,8 +119,8 @@ def generate_launch_description():
             DeclareLaunchArgument("strong_forward_pwm", default_value="1700"),
             DeclareLaunchArgument("strong_forward_duration_sec", default_value="5.0"),
             DeclareLaunchArgument("strong_backoff_pwm", default_value="1300"),
-            DeclareLaunchArgument("strong_backoff_duration_sec", default_value="2.0"),
-            DeclareLaunchArgument("search_timeout_sec", default_value="40.0"),
+            DeclareLaunchArgument("strong_backoff_duration_sec", default_value="3.0"),
+            DeclareLaunchArgument("search_timeout_sec", default_value="60.0"),
             DeclareLaunchArgument("area_verify_sec", default_value="12.0"),
             Node(
                 package="auv_test_vision",
@@ -119,6 +137,18 @@ def generate_launch_description():
                         "depth_pose_offset_m": ParameterValue(
                             LaunchConfiguration("depth_pose_offset_m"), value_type=float
                         ),
+                        "vision_search_request_topic": LaunchConfiguration(
+                            "vision_search_request_topic"
+                        ),
+                        "target_confirmed_topic": LaunchConfiguration(
+                            "target_confirmed_topic"
+                        ),
+                        "vision_control_granted_topic": LaunchConfiguration(
+                            "vision_control_granted_topic"
+                        ),
+                        "homing_timeout_topic": LaunchConfiguration(
+                            "homing_timeout_topic"
+                        ),
                         "state_topic": LaunchConfiguration("state_topic"),
                         "rc_override_topic": LaunchConfiguration("rc_override_topic"),
                         "rc_monitor_topic": LaunchConfiguration("rc_monitor_topic"),
@@ -130,9 +160,6 @@ def generate_launch_description():
                         ),
                         "surface_depth_m": ParameterValue(
                             LaunchConfiguration("surface_depth_m"), value_type=float
-                        ),
-                        "target_depth_m": ParameterValue(
-                            LaunchConfiguration("target_depth_m"), value_type=float
                         ),
                         "buoy_class_id": ParameterValue(
                             LaunchConfiguration("buoy_class_id"), value_type=int
@@ -261,8 +288,34 @@ def generate_launch_description():
                         "search_yaw_pwm": ParameterValue(
                             LaunchConfiguration("search_yaw_pwm"), value_type=int
                         ),
+                        "search_yaw_duration_sec": ParameterValue(
+                            LaunchConfiguration("search_yaw_duration_sec"), value_type=float
+                        ),
                         "search_forward_pwm": ParameterValue(
                             LaunchConfiguration("search_forward_pwm"), value_type=int
+                        ),
+                        "search_forward_duration_sec": ParameterValue(
+                            LaunchConfiguration("search_forward_duration_sec"), value_type=float
+                        ),
+                        "search_recovery_yaw_pwm": ParameterValue(
+                            LaunchConfiguration("search_recovery_yaw_pwm"), value_type=int
+                        ),
+                        "search_recovery_yaw_duration_sec": ParameterValue(
+                            LaunchConfiguration("search_recovery_yaw_duration_sec"),
+                            value_type=float,
+                        ),
+                        "search_recovery_forward_pwm": ParameterValue(
+                            LaunchConfiguration("search_recovery_forward_pwm"), value_type=int
+                        ),
+                        "search_recovery_forward_duration_sec": ParameterValue(
+                            LaunchConfiguration("search_recovery_forward_duration_sec"),
+                            value_type=float,
+                        ),
+                        "once_search_yaw_pwm": ParameterValue(
+                            LaunchConfiguration("once_search_yaw_pwm"), value_type=int
+                        ),
+                        "once_search_duration_sec": ParameterValue(
+                            LaunchConfiguration("once_search_duration_sec"), value_type=float
                         ),
                         "reacquire_yaw_pwm": ParameterValue(
                             LaunchConfiguration("reacquire_yaw_pwm"), value_type=int

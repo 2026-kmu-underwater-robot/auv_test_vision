@@ -2,16 +2,20 @@
 //
 // 비전 bbox + 수심을 받아 MAVROS RC override로 throttle/yaw/forward를 제어한다.
 // 테스트 흐름:
-//   DIVE -> SEARCH -> TARGET_HOLD -> APPROACH_BUOY -> STRONG_FORWARD
+//   IDLE -> TARGET_CONFIRM -> WAIT_CONTROL_GRANT
+//        -> ONCE_SERCH(최초 homing timeout) / SEARCH
+//        -> TARGET_HOLD -> APPROACH_BUOY -> STRONG_FORWARD
 //        -> STRONG_BACKOFF -> SEARCH (무한 반복)
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -19,6 +23,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <mavros_msgs/msg/override_rc_in.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -36,6 +41,15 @@ public:
     // pose.z 를 양의 하방(positive-down) 수심[m]으로 변환: depth = scale * z + offset
     depth_pose_scale_ = declare_parameter<double>("depth_pose_scale", -1.0);
     depth_pose_offset_m_ = declare_parameter<double>("depth_pose_offset_m", 0.0);
+    // Acoustic 요청 후 타깃을 확인하고, 제어권 승인 후에만 RC를 출력한다.
+    vision_search_request_topic_ = declare_parameter<std::string>(
+      "vision_search_request_topic", "/homing/vision_search_active");
+    target_confirmed_topic_ = declare_parameter<std::string>(
+      "target_confirmed_topic", "/vision/target_confirmed");
+    vision_control_granted_topic_ = declare_parameter<std::string>(
+      "vision_control_granted_topic", "/homing/vision_control_granted");
+    homing_timeout_topic_ = declare_parameter<std::string>(
+      "homing_timeout_topic", "/homing/timeout");
     state_topic_ = declare_parameter<std::string>("state_topic", "/mission/state");
     rc_override_topic_ =
       declare_parameter<std::string>("rc_override_topic", "/mavros/rc/override");
@@ -46,8 +60,6 @@ public:
     control_rate_hz_ = declare_parameter<double>("control_rate_hz", 20.0);
     detection_timeout_sec_ = declare_parameter<double>("detection_timeout_sec", 1.0);
     surface_depth_m_ = declare_parameter<double>("surface_depth_m", 0.0);
-    // 핸드셰이크 인계 수심 대신, 노드 시작 시 이 목표 수심으로 즉시 잠항한다.
-    target_depth_m_ = declare_parameter<double>("target_depth_m", 0.05);
     depth_tolerance_m_ = declare_parameter<double>("depth_tolerance_m", 0.2);
     // Hydrophone 제어기와 같은 PID 구조. 수심은 positive-down이므로 양의 오차는 하강 명령이다.
     depth_kp_ = declare_parameter<double>("depth_kp", 0.3);
@@ -68,7 +80,7 @@ public:
     target_confirm_sec_ = declare_parameter<double>("target_confirm_sec", 0.2);
     // bbox 면적 / 이미지 면적 비율이 이 값 이상이면 "충분히 가까움"으로 판단
     approach_area_ratio_ = declare_parameter<double>("approach_area_ratio", 0.10);
-    search_timeout_sec_ = declare_parameter<double>("search_timeout_sec", 40.0);
+    search_timeout_sec_ = declare_parameter<double>("search_timeout_sec", 60.0);
     area_verify_sec_ = declare_parameter<double>("area_verify_sec", 12.0);
     // SEARCH 다중 부표 선택: 면적 비슷 판정 / confidence 비슷 판정 / 동일 타깃 판정
     buoy_area_similar_ratio_ = declare_parameter<double>("buoy_area_similar_ratio", 0.15);
@@ -121,7 +133,18 @@ public:
     approach_vision_throttle_weight_ =
       declare_parameter<double>("approach_vision_throttle_weight", 0.4);
     search_yaw_pwm_ = declare_parameter<int>("search_yaw_pwm", 1560);
-    search_forward_pwm_ = declare_parameter<int>("search_forward_pwm", 1520);
+    search_yaw_duration_sec_ = declare_parameter<double>("search_yaw_duration_sec", 10.0);
+    search_forward_pwm_ = declare_parameter<int>("search_forward_pwm", 1700);
+    search_forward_duration_sec_ =
+      declare_parameter<double>("search_forward_duration_sec", 5.0);
+    search_recovery_yaw_pwm_ = declare_parameter<int>("search_recovery_yaw_pwm", 1440);
+    search_recovery_yaw_duration_sec_ =
+      declare_parameter<double>("search_recovery_yaw_duration_sec", 5.0);
+    search_recovery_forward_pwm_ = declare_parameter<int>("search_recovery_forward_pwm", 1700);
+    search_recovery_forward_duration_sec_ =
+      declare_parameter<double>("search_recovery_forward_duration_sec", 5.0);
+    once_search_yaw_pwm_ = declare_parameter<int>("once_search_yaw_pwm", 1560);
+    once_search_duration_sec_ = declare_parameter<double>("once_search_duration_sec", 10.0);
     reacquire_yaw_pwm_ = declare_parameter<int>("reacquire_yaw_pwm", 1470);
     reacquire_yaw_duration_sec_ =
       declare_parameter<double>("reacquire_yaw_duration_sec", 0.5);
@@ -138,11 +161,29 @@ public:
     depth_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
       depth_pose_topic_, 10,
       std::bind(&MissionStateMachineNode::on_depth_pose, this, std::placeholders::_1));
+    vision_search_request_sub_ = create_subscription<std_msgs::msg::Bool>(
+      vision_search_request_topic_, rclcpp::QoS(1).reliable().transient_local(),
+      std::bind(&MissionStateMachineNode::on_vision_search_request, this,
+        std::placeholders::_1));
+    vision_control_granted_sub_ = create_subscription<std_msgs::msg::Bool>(
+      vision_control_granted_topic_, rclcpp::QoS(1).reliable().transient_local(),
+      std::bind(&MissionStateMachineNode::on_vision_control_granted, this,
+        std::placeholders::_1));
+    homing_timeout_sub_ = create_subscription<std_msgs::msg::Bool>(
+      homing_timeout_topic_, rclcpp::QoS(1).reliable().transient_local(),
+      std::bind(&MissionStateMachineNode::on_homing_timeout, this, std::placeholders::_1));
     rc_pub_ = create_publisher<mavros_msgs::msg::OverrideRCIn>(rc_override_topic_, 10);
     rc_monitor_pub_ = create_publisher<mavros_msgs::msg::OverrideRCIn>(rc_monitor_topic_, 10);
     // latched: 늦게 구독해도 마지막 상태를 받을 수 있음
     state_pub_ = create_publisher<std_msgs::msg::String>(
       state_topic_, rclcpp::QoS(1).reliable().transient_local());
+    target_confirmed_pub_ = create_publisher<std_msgs::msg::Bool>(
+      target_confirmed_topic_, rclcpp::QoS(1).reliable().transient_local());
+
+    // SIGINT/SIGTERM 및 ROS context 종료 시 context가 완전히 내려가기 전에 RC를 해제한다.
+    shutdown_context_ = get_node_base_interface()->get_context();
+    pre_shutdown_callback_handle_ = shutdown_context_->add_pre_shutdown_callback(
+      [this]() noexcept {publish_release_once();});
 
     const double period_sec = 1.0 / std::max(1.0, control_rate_hz_);
     timer_ = create_wall_timer(
@@ -150,29 +191,50 @@ public:
       std::bind(&MissionStateMachineNode::on_timer, this));
 
     state_entered_at_ = now();
-    mission_hold_depth_m_ = target_depth_m_;
     publish_state();
+    publish_target_confirmed(false);
     RCLCPP_INFO(
       get_logger(),
-      "Looping vision test ready; target_depth=%.2f m depth_pose=%s bbox=%s state=%s "
-      "rc_output=%s rc_monitor=%s", target_depth_m_, depth_pose_topic_.c_str(), bbox_topic_.c_str(),
+      "Looping vision test ready; vision_request=%s control_grant=%s homing_timeout=%s depth_pose=%s "
+      "bbox=%s state=%s rc_output=%s rc_monitor=%s",
+      vision_search_request_topic_.c_str(), vision_control_granted_topic_.c_str(),
+      homing_timeout_topic_.c_str(),
+      depth_pose_topic_.c_str(), bbox_topic_.c_str(),
       state_topic_.c_str(), rc_override_topic_.c_str(), rc_monitor_topic_.c_str());
+    RCLCPP_INFO(get_logger(), "Vision RC remains silent until acoustic control is granted");
   }
 
   // 노드 종료 시 제어 채널을 한 번 RELEASE 해서 수동/다른 제어기에 넘긴다.
   void publish_release_once()
   {
+    if (!vision_has_control_ || release_published_.exchange(true)) {
+      return;
+    }
+    shutdown_release_active_.store(true);
     auto channels = nochange_channels();
     release_controlled_channels(channels);
-    publish_channels(channels);
+    std::lock_guard<std::mutex> lock(rc_publish_mutex_);
+    // 종료 직전 패킷 유실 가능성을 낮추기 위해 같은 RELEASE를 여러 번 큐잉한다.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      publish_channels_unlocked(channels);
+    }
+    try {
+      (void)rc_pub_->wait_for_all_acked(std::chrono::milliseconds(200));
+    } catch (...) {
+      // shutdown 콜백은 예외를 외부로 전파하지 않는다.
+    }
   }
 
 private:
   // 미션 단계. 타이머 콜백에서 switch로 분기한다.
   enum class State
   {
-    DIVE,            // 시작 즉시 target_depth_m으로 잠항
+    IDLE,            // Acoustic의 비전 탐색 요청 대기, RC 미발행
+    TARGET_CONFIRM,  // 타깃 확정만 수행, RC 미발행
+    WAIT_CONTROL_GRANT, // Acoustic의 RC 해제/제어권 승인 대기
+    ONCE_SERCH,      // 최초 homing timeout 때만 10초간 한 바퀴 탐색
     SEARCH,          // yaw 회전하며 buoy 탐색
+    SEARCH_RECOVERY, // SEARCH 60초 미검출 시 반대 yaw 후 전진을 한 번 수행
     TARGET_HOLD,     // buoy 검출 즉시 수평 중립으로 정지하고 안정 검출 확인
     REACQUIRE_BUOY,  // target hold 중 유실된 buoy를 짧게 역방향 yaw로 재탐색
     APPROACH_BUOY,   // buoy 중심 추적 + 전진
@@ -267,6 +329,99 @@ private:
     {
       throw std::invalid_argument("invalid approach target or close hold time");
     }
+    if (once_search_duration_sec_ < 0.0) {
+      throw std::invalid_argument("once_search_duration_sec must be >= 0");
+    }
+    if (
+      !std::isfinite(search_yaw_duration_sec_) ||
+      !std::isfinite(search_forward_duration_sec_) ||
+      !std::isfinite(search_recovery_yaw_duration_sec_) ||
+      !std::isfinite(search_recovery_forward_duration_sec_) ||
+      !std::isfinite(search_timeout_sec_) ||
+      search_yaw_duration_sec_ <= 0.0 || search_forward_duration_sec_ <= 0.0 ||
+      search_recovery_yaw_duration_sec_ <= 0.0 ||
+      search_recovery_forward_duration_sec_ <= 0.0 || search_timeout_sec_ <= 0.0)
+    {
+      throw std::invalid_argument("SEARCH phase durations must be > 0");
+    }
+  }
+
+  // Acoustic이 near zone에 진입하면 비전으로 타깃을 확인하되 RC는 발행하지 않는다.
+  void on_vision_search_request(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data || state_ != State::IDLE) {
+      return;
+    }
+    buoy_.reset();
+    stick_.reset();
+    mission_hold_depth_m_.reset();
+    target_confirm_started_at_.reset();
+    publish_target_confirmed(false);
+    transition_to(State::TARGET_CONFIRM, "acoustic vision-search request");
+  }
+
+  // Acoustic이 RC를 해제한 뒤 승인하면 현재 수심을 작업 수심으로 캡처한다.
+  // 탐색 요청 없이 승인만 들어오는 강제 인계도 지원한다.
+  void on_vision_control_granted(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data) {
+      return;
+    }
+    if (state_ != State::IDLE &&
+      state_ != State::TARGET_CONFIRM &&
+      state_ != State::WAIT_CONTROL_GRANT)
+    {
+      return;
+    }
+    if (!depth_m_) {
+      RCLCPP_ERROR(get_logger(), "Ignoring acoustic control grant without a valid depth sample");
+      return;
+    }
+    vision_has_control_ = true;
+    mission_hold_depth_m_ = *depth_m_;
+    reset_depth_pid();
+    RCLCPP_INFO(
+      get_logger(), "Hydrophone handoff depth captured: %.2f m", *mission_hold_depth_m_);
+    // 정상 핸드셰이크로 제어권을 받아도 최초 1회는 ONCE_SERCH를 거친다.
+    // timeout 경로와 같은 플래그를 사용하므로 두 경로를 합쳐 한 번만 실행된다.
+    if (!once_search_used_) {
+      once_search_used_ = true;
+      target_confirm_started_at_.reset();
+      transition_to(State::ONCE_SERCH, "normal acoustic handoff; one-turn search started");
+      return;
+    }
+    if (recent(buoy_) && buoy_->consecutive_hits >= target_confirm_hits_) {
+      transition_to(State::APPROACH_BUOY, "acoustic control released; buoy already confirmed");
+      return;
+    }
+    if (state_ == State::IDLE) {
+      buoy_.reset();
+      stick_.reset();
+      target_confirm_started_at_.reset();
+    }
+    transition_to(State::SEARCH, "acoustic control released; visual search started");
+  }
+
+  // 최초 /homing/timeout=true만 소비한다. 이 신호는 Hydrophone 제어 종료로 간주하고
+  // 현재 수심을 캡처한 뒤 1회전 탐색을 시작한다. 이후 timeout 신호는 무시한다.
+  void on_homing_timeout(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data || once_search_used_) {
+      return;
+    }
+    if (!depth_m_) {
+      RCLCPP_ERROR(get_logger(), "Ignoring first homing timeout without a valid depth sample");
+      return;
+    }
+    once_search_used_ = true;
+    vision_has_control_ = true;
+    mission_hold_depth_m_ = *depth_m_;
+    reset_depth_pid();
+    target_confirm_started_at_.reset();
+    RCLCPP_INFO(
+      get_logger(), "First homing timeout: ONCE_SERCH started at %.2f m",
+      *mission_hold_depth_m_);
+    transition_to(State::ONCE_SERCH, "first homing timeout received");
   }
 
   void on_depth_pose(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
@@ -354,7 +509,7 @@ private:
     if (best_buoy) {
       accept_buoy_detection(*best_buoy);
       // 검출 콜백에서 즉시 정지 상태를 예약해 다음 제어 주기부터 수평 이동을 멈춘다.
-      if (state_ == State::SEARCH) {
+      if (state_ == State::SEARCH || state_ == State::SEARCH_RECOVERY) {
         transition_to(State::TARGET_HOLD, "buoy detected; horizontal motion stopped");
       }
     }
@@ -368,8 +523,10 @@ private:
   void accept_buoy_detection(Detection incoming)
   {
     const bool selecting =
-      state_ == State::SEARCH || state_ == State::AREA_VERIFY ||
-      state_ == State::DIVE || state_ == State::TARGET_HOLD ||
+      state_ == State::ONCE_SERCH || state_ == State::SEARCH ||
+      state_ == State::SEARCH_RECOVERY || state_ == State::AREA_VERIFY ||
+      state_ == State::IDLE || state_ == State::TARGET_CONFIRM ||
+      state_ == State::WAIT_CONTROL_GRANT || state_ == State::TARGET_HOLD ||
       state_ == State::REACQUIRE_BUOY;
     if (!recent(buoy_)) {
       buoy_ = incoming;
@@ -446,17 +603,35 @@ private:
     return alpha * sample + (1.0 - alpha) * previous;
   }
 
-  // 주기 제어 루프: enable/수심 가드 후 현재 State별 동작을 수행하고 RC를 발행한다.
+  // 주기 제어 루프: 핸드셰이크 승인 전에는 RC를 전혀 발행하지 않는다.
   void on_timer()
   {
     auto channels = nochange_channels();
 
+    if (state_ == State::IDLE) {
+      return;
+    }
+    if (state_ == State::TARGET_CONFIRM) {
+      run_target_confirm();
+      return;
+    }
+    if (state_ == State::WAIT_CONTROL_GRANT || !vision_has_control_) {
+      return;
+    }
+
     switch (state_) {
-      case State::DIVE:
-        run_dive(channels);
+      case State::IDLE:
+      case State::TARGET_CONFIRM:
+      case State::WAIT_CONTROL_GRANT:
+        break;
+      case State::ONCE_SERCH:
+        run_once_search(channels);
         break;
       case State::SEARCH:
         run_search(channels);
+        break;
+      case State::SEARCH_RECOVERY:
+        run_search_recovery(channels);
         break;
       case State::TARGET_HOLD:
         run_target_hold(channels);
@@ -533,22 +708,27 @@ private:
     publish_channels(channels);
   }
 
-  // 시작 직후 설정된 작업수심으로 잠항하고, 허용 오차 안이면 탐색을 시작한다.
-  void run_dive(std::array<uint16_t, 18> & channels)
+  // 승인 전 타깃을 안정 검출하면 Acoustic에 확인을 알리고 제어권 승인을 기다린다.
+  void run_target_confirm()
   {
-    set_neutral_control(channels);
-    // 최초 수심 수신 전에는 모든 제어축을 중립으로 유지한다.
-    if (!depth_m_ || !mission_hold_depth_m_) {
+    const bool stable_candidate = recent(buoy_) &&
+      buoy_->consecutive_hits >= target_confirm_hits_;
+    if (!stable_candidate) {
+      target_confirm_started_at_.reset();
       return;
     }
-    hold_work_depth(channels);
-    if (std::abs(*depth_m_ - *mission_hold_depth_m_) <= depth_tolerance_m_) {
-      transition_to(State::SEARCH, "target depth reached");
+    if (!target_confirm_started_at_) {
+      target_confirm_started_at_ = now();
+      return;
     }
+    if ((now() - *target_confirm_started_at_).seconds() < target_confirm_sec_) {
+      return;
+    }
+    publish_target_confirmed(true);
+    transition_to(State::WAIT_CONTROL_GRANT, "stable nearest buoy confirmed");
   }
 
-  // 원본 TARGET_CONFIRM의 동일한 연속 hit + 유지시간 검증을 TARGET_HOLD에서 수행한다.
-  // Acoustic에 확인을 발행하거나 grant를 기다리는 부분만 제거했다.
+  // 제어권 인계 후 TARGET_HOLD에서도 같은 연속 hit + 유지시간 기준으로 접근을 시작한다.
   void run_search_confirm()
   {
     const bool stable_candidate = recent(buoy_) &&
@@ -566,17 +746,82 @@ private:
     }
   }
 
-  // 수심 유지 + 완만한 전진/yaw 회전 탐색. buoy를 발견하면 즉시 TARGET_HOLD로 전환한다.
+  // 최초 timeout에만 실행한다. 전진 없이 yaw=1560으로 최대 10초간 회전하고,
+  // 안정 검출 조건을 만족하면 즉시 APPROACH_BUOY로 넘어간다.
+  void run_once_search(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_work_depth(channels);
+    set_channel(channels, yaw_channel_, once_search_yaw_pwm_);
+
+    const bool stable_candidate = recent(buoy_) &&
+      buoy_->consecutive_hits >= target_confirm_hits_;
+    if (!stable_candidate) {
+      target_confirm_started_at_.reset();
+    } else if (!target_confirm_started_at_) {
+      target_confirm_started_at_ = now();
+    } else if ((now() - *target_confirm_started_at_).seconds() >= target_confirm_sec_) {
+      transition_to(State::APPROACH_BUOY, "buoy confirmed during one-turn search");
+      return;
+    }
+
+    if (state_age_sec() >= once_search_duration_sec_) {
+      target_confirm_started_at_.reset();
+      transition_to(State::SEARCH, "one-turn search complete");
+    }
+  }
+
+  // 수심을 유지하며 yaw 1560으로 한 바퀴(10초) -> 강한 전진 5초를 반복한다.
+  // 어느 단계에서든 buoy를 발견하면 즉시 TARGET_HOLD로 전환한다.
   void run_search(std::array<uint16_t, 18> & channels)
   {
     set_neutral_control(channels);
-    set_channel(channels, throttle_channel_, depth_control_pwm(*mission_hold_depth_m_));
-    set_channel(channels, yaw_channel_, search_yaw_pwm_);
-    set_channel(channels, forward_channel_, search_forward_pwm_);
+    hold_work_depth(channels);
+
+    if (search_session_age_sec() >= search_timeout_sec_) {
+      transition_to(State::SEARCH_RECOVERY, "buoy not found within search timeout");
+      run_search_recovery(channels);
+      return;
+    }
+
+    const double cycle_sec = search_yaw_duration_sec_ + search_forward_duration_sec_;
+    const double phase_sec = std::fmod(std::max(0.0, state_age_sec()), cycle_sec);
+    if (phase_sec < search_yaw_duration_sec_) {
+      set_channel(channels, yaw_channel_, search_yaw_pwm_);
+    } else {
+      set_channel(channels, forward_channel_, search_forward_pwm_);
+    }
+
     if (recent(buoy_)) {
       transition_to(State::TARGET_HOLD, "buoy detected; horizontal motion stopped");
     }
-    // SEARCH timeout을 두지 않는다. 반복 테스트는 탐색을 계속한다.
+  }
+
+  // SEARCH에서 60초간 미검출 시 반대 yaw 5초 -> 강한 전진 5초를 한 번 수행한다.
+  // 완료 후 SEARCH 타이머를 새로 시작하며, 도중 검출 시 TARGET_HOLD로 전환한다.
+  void run_search_recovery(std::array<uint16_t, 18> & channels)
+  {
+    set_neutral_control(channels);
+    hold_work_depth(channels);
+
+    if (state_age_sec() < search_recovery_yaw_duration_sec_) {
+      set_channel(channels, yaw_channel_, search_recovery_yaw_pwm_);
+    } else {
+      set_channel(channels, forward_channel_, search_recovery_forward_pwm_);
+    }
+
+    if (recent(buoy_)) {
+      transition_to(State::TARGET_HOLD, "buoy detected during search recovery");
+      return;
+    }
+    const double recovery_duration_sec =
+      search_recovery_yaw_duration_sec_ + search_recovery_forward_duration_sec_;
+    if (state_age_sec() >= recovery_duration_sec) {
+      buoy_.reset();
+      stick_.reset();
+      target_confirm_started_at_.reset();
+      transition_to(State::SEARCH, "search recovery complete");
+    }
   }
 
   // buoy를 발견한 순간 yaw/forward를 중립으로 두고 안정 검출을 확인한다.
@@ -842,17 +1087,40 @@ private:
     return (now() - state_entered_at_).seconds();
   }
 
+  // TARGET_HOLD의 일시적 오검출/유실 왕복은 SEARCH 60초 누적 시간에서 제외하지 않는다.
+  double search_session_age_sec() const
+  {
+    if (!search_session_started_at_) {
+      return 0.0;
+    }
+    return (now() - *search_session_started_at_).seconds();
+  }
+
   // 상태 전이. 동일 상태면 no-op. 진입 시각·조건 타이머를 리셋하고 state 토픽을 발행한다.
   void transition_to(State next, const std::string & reason)
   {
     if (state_ == next) {
       return;
     }
+    const auto transitioned_at = now();
     RCLCPP_INFO(
       get_logger(), "State %s -> %s: %s", state_name(state_), state_name(next), reason.c_str());
     state_ = next;
-    state_entered_at_ = now();
+    state_entered_at_ = transitioned_at;
     condition_started_at_.reset();
+
+    // SEARCH에서 시작된 TARGET_HOLD/REACQUIRE/APPROACH 후보 추적 경로에서는 최초 SEARCH
+    // 시작 시각을 보존한다. 회복 동작이나 실제 작업 펄스로 탐색 세션이 끝나면 초기화된다.
+    if (next == State::SEARCH) {
+      if (!search_session_started_at_) {
+        search_session_started_at_ = transitioned_at;
+      }
+    } else if (
+      next != State::TARGET_HOLD && next != State::REACQUIRE_BUOY &&
+      next != State::APPROACH_BUOY)
+    {
+      search_session_started_at_.reset();
+    }
     if (next == State::ASCEND || next == State::COMPLETE) {
       reset_depth_pid();
     }
@@ -872,11 +1140,22 @@ private:
     state_pub_->publish(msg);
   }
 
+  void publish_target_confirmed(bool confirmed)
+  {
+    std_msgs::msg::Bool msg;
+    msg.data = confirmed;
+    target_confirmed_pub_->publish(msg);
+  }
+
   static const char * state_name(State state)
   {
     switch (state) {
-      case State::DIVE: return "DIVE";
+      case State::IDLE: return "IDLE";
+      case State::TARGET_CONFIRM: return "TARGET_CONFIRM";
+      case State::WAIT_CONTROL_GRANT: return "WAIT_CONTROL_GRANT";
+      case State::ONCE_SERCH: return "ONCE_SERCH";
       case State::SEARCH: return "SEARCH";
+      case State::SEARCH_RECOVERY: return "SEARCH_RECOVERY";
       case State::TARGET_HOLD: return "TARGET_HOLD";
       case State::REACQUIRE_BUOY: return "REACQUIRE_BUOY";
       case State::APPROACH_BUOY: return "APPROACH_BUOY";
@@ -929,6 +1208,15 @@ private:
 
   void publish_channels(const std::array<uint16_t, 18> & channels)
   {
+    std::lock_guard<std::mutex> lock(rc_publish_mutex_);
+    if (shutdown_release_active_.load()) {
+      return;
+    }
+    publish_channels_unlocked(channels);
+  }
+
+  void publish_channels_unlocked(const std::array<uint16_t, 18> & channels)
+  {
     mavros_msgs::msg::OverrideRCIn msg;
     msg.channels = channels;
     rc_pub_->publish(msg);
@@ -940,13 +1228,16 @@ private:
   std::string depth_pose_topic_;
   double depth_pose_scale_{-1.0};
   double depth_pose_offset_m_{0.0};
+  std::string vision_search_request_topic_;
+  std::string target_confirmed_topic_;
+  std::string vision_control_granted_topic_;
+  std::string homing_timeout_topic_;
   std::string state_topic_;
   std::string rc_override_topic_;
   std::string rc_monitor_topic_;
   double control_rate_hz_{20.0};
   double detection_timeout_sec_{1.0};
   double surface_depth_m_{0.0};
-  double target_depth_m_{0.05};
   double depth_tolerance_m_{0.2};
   double depth_kp_{0.3};
   double depth_ki_{0.05};
@@ -962,7 +1253,7 @@ private:
   int target_confirm_hits_{3};
   double target_confirm_sec_{0.2};
   double approach_area_ratio_{0.10};
-  double search_timeout_sec_{40.0};
+  double search_timeout_sec_{60.0};
   double area_verify_sec_{12.0};
   double buoy_area_similar_ratio_{0.15};
   double buoy_confidence_similar_delta_{0.05};
@@ -998,7 +1289,15 @@ private:
   int approach_forward_min_pwm_{1560};
   double approach_vision_throttle_weight_{0.4};
   int search_yaw_pwm_{1560};
-  int search_forward_pwm_{1520};
+  double search_yaw_duration_sec_{10.0};
+  int search_forward_pwm_{1700};
+  double search_forward_duration_sec_{5.0};
+  int search_recovery_yaw_pwm_{1440};
+  double search_recovery_yaw_duration_sec_{5.0};
+  int search_recovery_forward_pwm_{1700};
+  double search_recovery_forward_duration_sec_{5.0};
+  int once_search_yaw_pwm_{1560};
+  double once_search_duration_sec_{10.0};
   int reacquire_yaw_pwm_{1470};
   double reacquire_yaw_duration_sec_{0.5};
   double reacquire_timeout_sec_{1.0};
@@ -1006,8 +1305,11 @@ private:
   bool vertical_positive_is_up_{true};
 
   // --- 런타임 상태 ---
-  State state_{State::DIVE};
+  bool vision_has_control_{false};
+  bool once_search_used_{false};
+  State state_{State::IDLE};
   rclcpp::Time state_entered_at_{0, 0, RCL_ROS_TIME};
+  std::optional<rclcpp::Time> search_session_started_at_;
   // ALIGN deadband 유지 등 "조건 지속 시간" 측정용
   std::optional<rclcpp::Time> condition_started_at_;
   std::optional<rclcpp::Time> target_confirm_started_at_;
@@ -1025,10 +1327,19 @@ private:
   // --- ROS 인터페이스 ---
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr bbox_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr depth_pose_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr vision_search_request_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr vision_control_granted_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr homing_timeout_sub_;
   rclcpp::Publisher<mavros_msgs::msg::OverrideRCIn>::SharedPtr rc_pub_;
   rclcpp::Publisher<mavros_msgs::msg::OverrideRCIn>::SharedPtr rc_monitor_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr target_confirmed_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Context::SharedPtr shutdown_context_;
+  std::optional<rclcpp::PreShutdownCallbackHandle> pre_shutdown_callback_handle_;
+  std::mutex rc_publish_mutex_;
+  std::atomic_bool shutdown_release_active_{false};
+  std::atomic_bool release_published_{false};
 };
 
 int main(int argc, char ** argv)
